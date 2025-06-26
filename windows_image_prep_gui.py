@@ -185,11 +185,11 @@ class WindowsImagePrepGUI:
             self.log("INFO: Identifying OS volumes to capture...")
             try:
                 ps_command_disk = "(Get-Partition | Where-Object { $_.DriveLetter -eq $env:SystemDrive.Trim(':') }).DiskNumber"
-                disk_number_result = subprocess.run(["powershell", "-Command", ps_command_disk], capture_output=True, text=True, check=True)
+                disk_number_result = subprocess.run(["powershell", "-Command", ps_command_disk], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
                 disk_number = disk_number_result.stdout.strip()
 
                 ps_command_volumes = f"(Get-Partition -DiskNumber {disk_number} | ForEach-Object {{ $_.DriveLetter }} | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})"
-                volumes_result = subprocess.run(["powershell", "-Command", ps_command_volumes], capture_output=True, text=True, check=True)
+                volumes_result = subprocess.run(["powershell", "-Command", ps_command_volumes], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
                 volumes_to_capture = [v.strip() + ":" for v in volumes_result.stdout.strip().splitlines() if v.strip()]
                 
                 if not volumes_to_capture:
@@ -217,7 +217,7 @@ class WindowsImagePrepGUI:
                 net_use_cmd.append(f"/user:{username}")
                 net_use_cmd.append(password)
             
-            map_proc = subprocess.run(net_use_cmd, capture_output=True, text=True)
+            map_proc = subprocess.run(net_use_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
             if map_proc.returncode != 0:
                 self.log(f"ERROR: Failed to map network drive. {map_proc.stderr or map_proc.stdout}")
                 return
@@ -233,6 +233,8 @@ class WindowsImagePrepGUI:
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
+                encoding='utf-8',
+                errors='ignore',
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             
@@ -272,6 +274,8 @@ class WindowsImagePrepGUI:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             if process.stdout:
@@ -482,7 +486,7 @@ class WindowsImagePrepGUI:
                 # Check for AppX blockers
                 blockers_result = subprocess.run(
                     ["powershell", "-Command", "Get-Content 'C:\\Windows\\System32\\Sysprep\\Panther\\setuperr.log' -Raw | Select-String -Pattern 'SYSPRP Package (.*?) was installed for a user' -AllMatches | ForEach-Object { $_.Matches.Groups[1].Value }"],
-                    capture_output=True, text=True
+                    capture_output=True, text=True, encoding='utf-8', errors='ignore'
                 )
                 
                 blockers = list(set(blockers_result.stdout.strip().splitlines()))

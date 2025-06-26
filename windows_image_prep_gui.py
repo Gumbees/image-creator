@@ -151,15 +151,6 @@ class WindowsImagePrepGUI:
             messagebox.showerror("Download Failed", f"Could not download disk2vhd.exe.\nPlease download it manually from Sysinternals and place it next to this application.")
             return False
 
-    def find_unused_drive_letter(self):
-        """Finds an available drive letter, starting from Z:."""
-        for letter in reversed(string.ascii_uppercase):
-            drive = f"{letter}:\\"
-            if not os.path.exists(drive):
-                self.log(f"INFO: Found unused drive letter: {letter}:")
-                return f"{letter}:"
-        return None
-
     def start_image_creation_thread(self):
         """Starts the imaging process in a new thread to avoid freezing the GUI."""
         self.create_button.config(state="disabled")
@@ -169,6 +160,7 @@ class WindowsImagePrepGUI:
 
     def create_image_worker(self):
         """The main worker function that performs all imaging tasks."""
+        share_path = None # For cleanup
         try:
             # 1. Get parameters from GUI
             unc_path = self.unc_path_var.get()
@@ -200,32 +192,22 @@ class WindowsImagePrepGUI:
                 self.log(f"ERROR: Failed to identify OS volumes: {e}")
                 return
             
-            # 3. Map Network Drive
-            drive_letter = self.find_unused_drive_letter()
-            if not drive_letter:
-                self.log("ERROR: Could not find an unused drive letter to map the network share.")
-                return
-            
-            unc_path_obj = Path(unc_path)
-            share_path = str(unc_path_obj.parent)
-            image_filename = unc_path_obj.name
-            local_path = f"{drive_letter}\\{image_filename}"
-            
-            self.log(f"INFO: Mapping network share '{share_path}' to drive {drive_letter}...")
-            net_use_cmd = ["net", "use", drive_letter, share_path]
+            # 3. Authenticate to network share if credentials are provided
             if username and password:
-                net_use_cmd.append(f"/user:{username}")
-                net_use_cmd.append(password)
-            
-            map_proc = subprocess.run(net_use_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            if map_proc.returncode != 0:
-                self.log(f"ERROR: Failed to map network drive. {map_proc.stderr or map_proc.stdout}")
-                return
-            self.log("SUCCESS: Network drive mapped successfully.")
+                unc_path_obj = Path(unc_path)
+                share_path = str(unc_path_obj.parent)
+                self.log(f"INFO: Authenticating to network share '{share_path}'...")
+                net_use_cmd = ["net", "use", share_path, password, f"/user:{username}"]
+                
+                map_proc = subprocess.run(net_use_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+                if map_proc.returncode != 0:
+                    self.log(f"ERROR: Failed to authenticate to network share. {map_proc.stderr or map_proc.stdout}")
+                    return
+                self.log("SUCCESS: Authenticated to network share successfully.")
 
             # 4. Run Disk2vhd
             self.log("INFO: Starting Disk2vhd capture. This may take a long time...")
-            arguments = ["-accepteula", "-v", "-q", "-p"] + volumes_to_capture + [local_path]
+            arguments = ["-accepteula", "-v", "-q", "-p"] + volumes_to_capture + [unc_path]
             self.log(f"COMMAND: \"{disk2vhd_exe}\" {' '.join(arguments)}")
 
             process = subprocess.Popen(
@@ -254,14 +236,13 @@ class WindowsImagePrepGUI:
             self.log(f"FATAL: An unexpected error occurred: {e}")
         finally:
             # 5. Cleanup
-            self.log("INFO: Cleaning up mapped network drive...")
-            drive_letter_to_unmap = locals().get("drive_letter")
-            if drive_letter_to_unmap and os.path.exists(drive_letter_to_unmap + "\\"):
-                unmap_proc = subprocess.run(["net", "use", drive_letter_to_unmap, "/delete"], capture_output=True, text=True)
+            if share_path:
+                self.log(f"INFO: Cleaning up network connection to '{share_path}'...")
+                unmap_proc = subprocess.run(["net", "use", share_path, "/delete"], capture_output=True, text=True)
                 if unmap_proc.returncode == 0:
-                    self.log(f"INFO: Network drive {drive_letter_to_unmap} has been removed.")
+                    self.log(f"INFO: Network connection to '{share_path}' has been removed.")
                 else:
-                    self.log(f"WARN: Failed to remove network drive {drive_letter_to_unmap}. {unmap_proc.stderr or unmap_proc.stdout}")
+                    self.log(f"WARN: Failed to remove network connection to '{share_path}'. {unmap_proc.stderr or unmap_proc.stdout}")
             self.create_button.config(state="normal")
 
     def run_powershell(self, command, title):

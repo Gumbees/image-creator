@@ -16,6 +16,7 @@ import requests
 from pathlib import Path
 import string
 import time
+import webbrowser
 
 def check_platform():
     """Check if running on Windows"""
@@ -29,20 +30,44 @@ def check_platform():
 class WindowsImagePrepGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("OS Imaging Tool")
-        self.root.geometry("700x600")
-        self.root.minsize(600, 500)
+        self.root.title("OS Imaging and Processing Tool")
+        self.root.geometry("750x650")
+        self.root.minsize(700, 600)
 
         # Style
         self.style = ttk.Style(self.root)
         self.style.theme_use('vista')
         
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill="both", expand=True)
+        # --- Main UI Structure ---
+        # Create a notebook (tabbed interface)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(pady=10, padx=10, fill="both", expand=True)
+
+        # Create frames for each tab
+        create_frame = ttk.Frame(notebook, padding="10")
+        process_frame = ttk.Frame(notebook, padding="10")
+
+        notebook.add(create_frame, text='Create VHDX Image')
+        notebook.add(process_frame, text='Post-Process VHDX')
+
+        # --- Populate Tabs ---
+        self.populate_create_tab(create_frame)
+        self.populate_process_tab(process_frame)
+
+        # --- Log Area (shared across tabs) ---
+        log_frame = ttk.LabelFrame(self.root, text="Log", padding="10")
+        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state='disabled', bg="#f0f0f0")
+        self.log_area.pack(fill="both", expand=True)
         
+        # --- Initial Checks ---
+        self.check_admin()
+        self.check_and_download_disk2vhd()
+
+    def populate_create_tab(self, parent_frame):
+        """Populates the 'Create VHDX Image' tab with widgets."""
         # --- Configuration Section ---
-        config_frame = ttk.LabelFrame(main_frame, text="Configuration", padding="10")
+        config_frame = ttk.LabelFrame(parent_frame, text="Configuration", padding="10")
         config_frame.pack(fill="x", expand=False)
         config_frame.columnconfigure(1, weight=1)
 
@@ -72,12 +97,16 @@ class WindowsImagePrepGUI:
         self.password_entry = ttk.Entry(config_frame, textvariable=self.password_var, show="*")
         self.password_entry.grid(row=3, column=1, columnspan=2, sticky="we", padx=5)
 
+        # Capture Option
+        self.capture_os_only_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(config_frame, text="Capture only Windows (OS) volume (Recommended)", variable=self.capture_os_only_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=5)
+
         # --- Action Button ---
-        self.create_button = ttk.Button(main_frame, text="Create VHDX Image", command=self.start_image_creation_thread)
+        self.create_button = ttk.Button(parent_frame, text="Create VHDX Image", command=self.start_image_creation_thread)
         self.create_button.pack(pady=10, fill="x")
         
         # --- Generalization Section ---
-        generalize_frame = ttk.LabelFrame(main_frame, text="Generalization (Sysprep)", padding="10")
+        generalize_frame = ttk.LabelFrame(parent_frame, text="Generalization (Sysprep)", padding="10")
         generalize_frame.pack(fill="x", expand=False, pady=5)
         generalize_frame.columnconfigure(0, weight=1)
 
@@ -92,15 +121,30 @@ class WindowsImagePrepGUI:
         self.generalize_button = ttk.Button(generalize_frame, text="Prepare and Generalize System", command=self.start_generalization_thread)
         self.generalize_button.grid(row=3, column=0, sticky="ew", pady=10)
 
-        # --- Log Area ---
-        log_frame = ttk.LabelFrame(main_frame, text="Log", padding="10")
-        log_frame.pack(fill="both", expand=True)
-        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state='disabled', bg="#f0f0f0")
-        self.log_area.pack(fill="both", expand=True)
+    def populate_process_tab(self, parent_frame):
+        """Populates the 'Post-Process VHDX' tab with widgets."""
+        process_config_frame = ttk.LabelFrame(parent_frame, text="VHDX UEFI/GPT Conversion", padding="10")
+        process_config_frame.pack(fill="x", expand=False, pady=(0, 10))
+        process_config_frame.columnconfigure(1, weight=1)
         
-        # --- Initial Checks ---
-        self.check_admin()
-        self.check_and_download_disk2vhd()
+        # VHDX Path
+        ttk.Label(process_config_frame, text="VHDX Path:").grid(row=0, column=0, sticky="w", pady=2)
+        self.vhdx_path_var = tk.StringVar()
+        self.vhdx_path_entry = ttk.Entry(process_config_frame, textvariable=self.vhdx_path_var)
+        self.vhdx_path_entry.grid(row=0, column=1, sticky="we", padx=5)
+        self.vhdx_browse_button = ttk.Button(process_config_frame, text="Browse...", command=self.browse_vhdx_file)
+        self.vhdx_browse_button.grid(row=0, column=2, sticky="e")
+        
+        # gptgen Path
+        ttk.Label(process_config_frame, text="gptgen Path:").grid(row=1, column=0, sticky="w", pady=2)
+        self.gptgen_path_var = tk.StringVar(value=str(Path("./gptgen.exe").resolve()))
+        self.gptgen_entry = ttk.Entry(process_config_frame, textvariable=self.gptgen_path_var, state='readonly')
+        self.gptgen_entry.grid(row=1, column=1, sticky="we", padx=5)
+        self.gptgen_find_button = ttk.Button(process_config_frame, text="Help Me Find It", command=self.open_gptgen_download_page)
+        self.gptgen_find_button.grid(row=1, column=2, sticky="e")
+        
+        self.process_button = ttk.Button(parent_frame, text="Process VHDX (Mount, Convert, Partition)", command=self.start_vhdx_processing_thread)
+        self.process_button.pack(pady=10, fill="x")
 
     def log(self, message):
         """Appends a message to the log area in a thread-safe way."""
@@ -151,6 +195,22 @@ class WindowsImagePrepGUI:
             messagebox.showerror("Download Failed", f"Could not download disk2vhd.exe.\nPlease download it manually from Sysinternals and place it next to this application.")
             return False
 
+    def browse_vhdx_file(self):
+        """Opens a file dialog to select a VHDX file."""
+        path = filedialog.askopenfilename(
+            title="Select VHDX File",
+            filetypes=(("VHDX Files", "*.vhdx"), ("All files", "*.*"))
+        )
+        if path:
+            self.vhdx_path_var.set(path)
+
+    def open_gptgen_download_page(self):
+        """Opens a web browser to the gptgen download page."""
+        url = "https://sourceforge.net/projects/gptgen/"
+        self.log(f"INFO: Opening web browser to {url} for gptgen.")
+        self.log("INFO: Please download the tool, extract it, and place 'gptgen.exe' in the same folder as this application.")
+        webbrowser.open(url)
+
     def start_image_creation_thread(self):
         """Starts the imaging process in a new thread to avoid freezing the GUI."""
         self.create_button.config(state="disabled")
@@ -176,13 +236,21 @@ class WindowsImagePrepGUI:
             # 2. Find OS volumes
             self.log("INFO: Identifying OS volumes to capture...")
             try:
-                ps_command_disk = "(Get-Partition | Where-Object { $_.DriveLetter -eq $env:SystemDrive.Trim(':') }).DiskNumber"
-                disk_number_result = subprocess.run(["powershell", "-Command", ps_command_disk], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
-                disk_number = disk_number_result.stdout.strip()
+                if self.capture_os_only_var.get():
+                    self.log("INFO: 'Capture only OS volume' is selected.")
+                    system_drive = os.environ.get('SystemDrive')
+                    if not system_drive:
+                        raise ValueError("Could not determine SystemDrive from environment variables.")
+                    volumes_to_capture = [system_drive]
+                else:
+                    self.log("INFO: Capturing all volumes on the OS disk.")
+                    ps_command_disk = "(Get-Partition | Where-Object { $_.DriveLetter -eq $env:SystemDrive.Trim(':') }).DiskNumber"
+                    disk_number_result = subprocess.run(["powershell", "-Command", ps_command_disk], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
+                    disk_number = disk_number_result.stdout.strip()
 
-                ps_command_volumes = f"(Get-Partition -DiskNumber {disk_number} | ForEach-Object {{ $_.DriveLetter }} | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})"
-                volumes_result = subprocess.run(["powershell", "-Command", ps_command_volumes], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
-                volumes_to_capture = [v.strip() + ":" for v in volumes_result.stdout.strip().splitlines() if v.strip()]
+                    ps_command_volumes = f"(Get-Partition -DiskNumber {disk_number} | ForEach-Object {{ $_.DriveLetter }} | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})"
+                    volumes_result = subprocess.run(["powershell", "-Command", ps_command_volumes], capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
+                    volumes_to_capture = [v.strip() + ":" for v in volumes_result.stdout.strip().splitlines() if v.strip()]
                 
                 if not volumes_to_capture:
                     raise ValueError("Could not auto-detect any volumes.")
@@ -513,6 +581,135 @@ class WindowsImagePrepGUI:
         finally:
             self.generalize_button.config(state="normal")
             self.create_button.config(state="normal")
+
+    def start_vhdx_processing_thread(self):
+        """Starts the VHDX processing in a new thread."""
+        vhdx_path = self.vhdx_path_var.get()
+        if not vhdx_path or not Path(vhdx_path).exists():
+            messagebox.showerror("Invalid Path", "Please select a valid VHDX file.")
+            return
+
+        gptgen_path = Path(self.gptgen_path_var.get())
+        if not gptgen_path.exists():
+            messagebox.showerror("gptgen Not Found", f"gptgen.exe not found at {gptgen_path}.\nPlease use the 'Help Me Find It' button to download and place it correctly.")
+            return
+
+        if not messagebox.askyesno("Confirm VHDX Processing", 
+                                   f"This will modify the VHDX at:\n{vhdx_path}\n\nThe process involves mounting, converting to GPT, and re-partitioning. This is a destructive operation on the VHDX file. Are you sure?"):
+            return
+            
+        self.process_button.config(state="disabled")
+        thread = threading.Thread(target=self.vhdx_processing_worker, args=(vhdx_path, str(gptgen_path)))
+        thread.daemon = True
+        thread.start()
+
+    def vhdx_processing_worker(self, vhdx_path, gptgen_path):
+        """Mounts, converts, and partitions the VHDX."""
+        disk_number = None
+        try:
+            self.log("--- Starting VHDX Post-Processing ---")
+            
+            # 1. Mount VHDX
+            self.log(f"INFO: Mounting VHDX: {vhdx_path}")
+            mount_command = f"""
+                $vhdx = Mount-Vhd -Path '{vhdx_path}' -Passthru
+                $diskNumber = ($vhdx | Get-Disk).DiskNumber
+                Write-Host "VHDX mounted as Disk $diskNumber"
+                return $diskNumber
+            """
+            # Using run instead of run_powershell to capture output directly
+            proc = subprocess.run(["powershell", "-Command", mount_command], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if proc.returncode != 0:
+                self.log(f"ERROR: Failed to mount VHDX. PowerShell output:\n{proc.stdout}\n{proc.stderr}")
+                return
+            
+            # Extract disk number from output
+            match = re.search(r'Disk (\d+)', proc.stdout)
+            if not match:
+                self.log(f"ERROR: Could not determine disk number for mounted VHDX. Output:\n{proc.stdout}")
+                # Attempt to find it another way before giving up
+                ps_find_disk = f"($vhd = Get-Vhd -Path '{vhdx_path}'; if($vhd) {{ ($vhd | Get-Disk).DiskNumber }} else {{ -1 }})"
+                disk_number_res = subprocess.run(['powershell', '-Command', ps_find_disk], capture_output=True, text=True)
+                disk_number = disk_number_res.stdout.strip()
+                if disk_number == "-1" or not disk_number.isdigit():
+                    self.log("ERROR: Secondary check also failed. Aborting.")
+                    return
+                self.log(f"INFO: Found disk number via secondary method: {disk_number}")
+            else:
+                disk_number = match.group(1)
+            
+            self.log(f"SUCCESS: VHDX is mounted as Disk {disk_number}.")
+
+            # 2. Convert to GPT
+            self.log(f"INFO: Converting Disk {disk_number} to GPT using gptgen...")
+            gptgen_proc = subprocess.run([gptgen_path, "-w", f"\\\\.\\physicaldrive{disk_number}"], capture_output=True, text=True)
+            if gptgen_proc.returncode != 0:
+                self.log(f"ERROR: gptgen failed. Output:\n{gptgen_proc.stdout}\n{gptgen_proc.stderr}")
+                return
+            self.log("SUCCESS: gptgen conversion completed.")
+
+            # 3. Repartition using diskpart
+            self.log("INFO: Re-partitioning the disk to create EFI and Recovery partitions...")
+            diskpart_script = f"""
+select disk {disk_number}
+select partition 1
+shrink desired=8192 minimum=8192
+create partition efi size=4096
+format fs=fat32 quick label="EFI"
+assign letter="S"
+create partition primary size=4096
+format fs=ntfs quick label="Recovery"
+set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"
+gpt attributes=0x8000000000000001
+"""
+            script_path = Path("./diskpart_script.txt")
+            with open(script_path, "w") as f:
+                f.write(diskpart_script)
+            
+            diskpart_proc = subprocess.run(["diskpart", "/s", str(script_path)], capture_output=True, text=True)
+            script_path.unlink() # Clean up script file
+            if diskpart_proc.returncode != 0:
+                 self.log(f"ERROR: diskpart failed. Output:\n{diskpart_proc.stdout}\n{diskpart_proc.stderr}")
+                 return
+            self.log("SUCCESS: Disk re-partitioned.")
+
+            # 4. Rebuild boot data
+            self.log("INFO: Rebuilding boot data on new EFI partition (S:)...")
+            # Find the Windows directory. It should be the largest partition, likely mounted.
+            ps_get_win_drive = f"Get-Partition -DiskNumber {disk_number} | Where-Object {{ $_.Type -eq 'Basic' }} | Sort-Object -Property Size -Descending | Select-Object -First 1 | Select-Object -ExpandProperty DriveLetter"
+            win_drive_res = subprocess.run(['powershell', '-Command', ps_get_win_drive], capture_output=True, text=True)
+            win_drive_letter = win_drive_res.stdout.strip()
+            if not win_drive_letter:
+                self.log("ERROR: Could not auto-detect the Windows drive letter on the mounted VHDX. Aborting bcdboot.")
+                return
+
+            self.log(f"INFO: Found Windows partition at {win_drive_letter}:")
+            win_path = f"{win_drive_letter}:\\Windows"
+            
+            bcdboot_proc = subprocess.run(["bcdboot", win_path, "/s", "S:", "/f", "UEFI"], capture_output=True, text=True)
+            if bcdboot_proc.returncode != 0:
+                self.log(f"ERROR: bcdboot failed. Output:\n{bcdboot_proc.stdout}\n{bcdboot_proc.stderr}")
+                return
+            self.log("SUCCESS: Boot data rebuilt.")
+
+            self.log("--- VHDX Post-Processing COMPLETED ---")
+
+        except Exception as e:
+            self.log(f"FATAL: An unexpected error occurred during VHDX processing: {e}")
+        finally:
+            # 5. Cleanup: Dismount VHDX
+            self.log("INFO: Cleaning up by dismounting the VHDX...")
+            dismount_command = f"Dismount-Vhd -Path '{vhdx_path}'"
+            if disk_number:
+                 dismount_command = f"Dismount-Vhd -DiskNumber {disk_number}"
+            
+            dismount_proc = subprocess.run(["powershell", "-Command", dismount_command], capture_output=True, text=True)
+            if dismount_proc.returncode == 0:
+                self.log("SUCCESS: VHDX dismounted.")
+            else:
+                self.log(f"WARN: Failed to dismount VHDX. It may need to be dismounted manually via Disk Management. Error:\n{dismount_proc.stderr or dismount_proc.stdout}")
+            
+            self.process_button.config(state="normal")
 
 def main():
     # Check platform first

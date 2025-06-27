@@ -275,7 +275,9 @@ class WindowsImagePrepGUI:
 
             # 4. Run Disk2vhd
             self.log("INFO: Starting Disk2vhd capture. This may take a long time...")
-            arguments = ["-accepteula", "-v", "-q", "-p"] + volumes_to_capture + [unc_path]
+            # The -v, -q, and -p flags are not supported by all versions of disk2vhd, removing them for compatibility.
+            # The .vhdx extension on the output file is usually sufficient.
+            arguments = ["-accepteula"] + volumes_to_capture + [unc_path]
             self.log(f"COMMAND: \"{disk2vhd_exe}\" {' '.join(arguments)}")
 
             process = subprocess.Popen(

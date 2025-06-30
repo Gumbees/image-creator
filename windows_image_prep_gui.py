@@ -79,27 +79,33 @@ class WindowsImagePrepGUI:
         self.download_button = ttk.Button(config_frame, text="Check / Download", command=self.check_and_download_disk2vhd)
         self.download_button.grid(row=0, column=2, sticky="e")
 
-        # Destination Path
-        ttk.Label(config_frame, text="VHDX UNC Path:").grid(row=1, column=0, sticky="w", pady=2)
-        self.unc_path_var = tk.StringVar()
-        self.unc_entry = ttk.Entry(config_frame, textvariable=self.unc_path_var)
-        self.unc_entry.grid(row=1, column=1, columnspan=2, sticky="we", padx=5)
-        self.unc_entry.insert(0, "\\\\server\\share\\image-name.vhdx")
+        # Destination Path (now supports both UNC and local paths)
+        ttk.Label(config_frame, text="VHDX Destination:").grid(row=1, column=0, sticky="w", pady=2)
+        self.destination_path_var = tk.StringVar()
+        self.destination_entry = ttk.Entry(config_frame, textvariable=self.destination_path_var)
+        self.destination_entry.grid(row=1, column=1, sticky="we", padx=5)
+        self.browse_destination_button = ttk.Button(config_frame, text="Browse...", command=self.browse_destination_path)
+        self.browse_destination_button.grid(row=1, column=2, sticky="e")
+        self.destination_entry.insert(0, "C:\\Images\\image-name.vhdx or \\\\server\\share\\image-name.vhdx")
         
-        # Credentials
-        ttk.Label(config_frame, text="Username:").grid(row=2, column=0, sticky="w", pady=2)
+        # Credentials (only needed for UNC paths)
+        creds_frame = ttk.LabelFrame(config_frame, text="Network Credentials (UNC paths only)", padding="5")
+        creds_frame.grid(row=2, column=0, columnspan=3, sticky="we", pady=5)
+        creds_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(creds_frame, text="Username:").grid(row=0, column=0, sticky="w", pady=2)
         self.username_var = tk.StringVar()
-        self.username_entry = ttk.Entry(config_frame, textvariable=self.username_var)
-        self.username_entry.grid(row=2, column=1, columnspan=2, sticky="we", padx=5)
+        self.username_entry = ttk.Entry(creds_frame, textvariable=self.username_var)
+        self.username_entry.grid(row=0, column=1, sticky="we", padx=5)
         
-        ttk.Label(config_frame, text="Password:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Label(creds_frame, text="Password:").grid(row=1, column=0, sticky="w", pady=2)
         self.password_var = tk.StringVar()
-        self.password_entry = ttk.Entry(config_frame, textvariable=self.password_var, show="*")
-        self.password_entry.grid(row=3, column=1, columnspan=2, sticky="we", padx=5)
+        self.password_entry = ttk.Entry(creds_frame, textvariable=self.password_var, show="*")
+        self.password_entry.grid(row=1, column=1, sticky="we", padx=5)
 
         # Capture Option
         self.capture_os_only_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(config_frame, text="Capture only Windows (OS) volume (Recommended)", variable=self.capture_os_only_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Checkbutton(config_frame, text="Capture only Windows (OS) volume (Recommended)", variable=self.capture_os_only_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
 
         # --- Action Button ---
         self.create_button = ttk.Button(parent_frame, text="Create VHDX Image", command=self.start_image_creation_thread)
@@ -204,6 +210,16 @@ class WindowsImagePrepGUI:
         if path:
             self.vhdx_path_var.set(path)
 
+    def browse_destination_path(self):
+        """Opens a file dialog to select a destination path for the VHDX file."""
+        path = filedialog.asksaveasfilename(
+            title="Save VHDX As...",
+            defaultextension=".vhdx",
+            filetypes=(("VHDX Files", "*.vhdx"), ("All files", "*.*"))
+        )
+        if path:
+            self.destination_path_var.set(path)
+
     def open_gptgen_download_page(self):
         """Opens a web browser to the gptgen download page."""
         url = "https://sourceforge.net/projects/gptgen/"
@@ -223,15 +239,42 @@ class WindowsImagePrepGUI:
         share_path = None # For cleanup
         try:
             # 1. Get parameters from GUI
-            unc_path = self.unc_path_var.get()
+            destination_path = self.destination_path_var.get().strip()
             username = self.username_var.get()
             password = self.password_var.get()
             disk2vhd_exe = self.disk2vhd_path_var.get()
 
-            if not unc_path or not unc_path.startswith("\\\\"):
-                self.log("ERROR: Invalid UNC path provided. It must start with \\\\.")
-                messagebox.showerror("Invalid Input", "Please provide a valid UNC path (e.g., \\\\server\\share\\image.vhdx).")
+            # Validate destination path
+            if not destination_path:
+                self.log("ERROR: No destination path provided.")
+                messagebox.showerror("Invalid Input", "Please provide a destination path for the VHDX file.")
                 return
+
+            # Clear placeholder text if it's still there
+            if "or \\\\" in destination_path:
+                self.log("ERROR: Please replace the placeholder text with an actual path.")
+                messagebox.showerror("Invalid Input", "Please provide a valid destination path (local or UNC).")
+                return
+
+            is_unc_path = destination_path.startswith("\\\\")
+            
+            if is_unc_path:
+                self.log(f"INFO: Using UNC path: {destination_path}")
+            else:
+                self.log(f"INFO: Using local path: {destination_path}")
+                # Validate local path - check if directory exists
+                local_dir = Path(destination_path).parent
+                if not local_dir.exists():
+                    self.log(f"ERROR: Local directory does not exist: {local_dir}")
+                    if messagebox.askyesno("Create Directory", f"The directory {local_dir} does not exist. Create it?"):
+                        try:
+                            local_dir.mkdir(parents=True, exist_ok=True)
+                            self.log(f"SUCCESS: Created directory: {local_dir}")
+                        except Exception as e:
+                            self.log(f"ERROR: Failed to create directory: {e}")
+                            return
+                    else:
+                        return
 
             # 2. Find OS volumes
             self.log("INFO: Identifying OS volumes to capture...")
@@ -260,10 +303,10 @@ class WindowsImagePrepGUI:
                 self.log(f"ERROR: Failed to identify OS volumes: {e}")
                 return
             
-            # 3. Authenticate to network share if credentials are provided
-            if username and password:
-                unc_path_obj = Path(unc_path)
-                share_path = str(unc_path_obj.parent)
+            # 3. Authenticate to network share if it's a UNC path and credentials are provided
+            if is_unc_path and username and password:
+                destination_path_obj = Path(destination_path)
+                share_path = str(destination_path_obj.parent)
                 self.log(f"INFO: Authenticating to network share '{share_path}'...")
                 net_use_cmd = ["net", "use", share_path, password, f"/user:{username}"]
                 
@@ -272,21 +315,25 @@ class WindowsImagePrepGUI:
                     self.log(f"ERROR: Failed to authenticate to network share. {map_proc.stderr or map_proc.stdout}")
                     return
                 self.log("SUCCESS: Authenticated to network share successfully.")
+            elif is_unc_path and not (username and password):
+                self.log("WARNING: UNC path specified but no credentials provided. Attempting to access with current user credentials.")
 
             # 4. Run Disk2vhd
             self.log("INFO: Starting Disk2vhd capture. This may take a long time...")
-            # The -v, -q, and -p flags are not supported by all versions of disk2vhd, removing them for compatibility.
+            # Using /accepteula is a common requirement for sysinternals tools.
             # The .vhdx extension on the output file is usually sufficient.
-            arguments = ["-accepteula"] + volumes_to_capture + [unc_path]
+            arguments = ["/accepteula"] + volumes_to_capture + [destination_path]
+            command_to_run = [disk2vhd_exe] + arguments
             self.log(f"COMMAND: \"{disk2vhd_exe}\" {' '.join(arguments)}")
 
             process = subprocess.Popen(
-                [disk2vhd_exe] + arguments, 
+                ' '.join(command_to_run), 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
                 encoding='utf-8',
                 errors='ignore',
+                shell=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             
@@ -298,14 +345,14 @@ class WindowsImagePrepGUI:
 
             if process.returncode == 0:
                 self.log("SUCCESS: Disk2vhd completed successfully!")
-                self.log(f"SUCCESS: Image saved to: {unc_path}")
+                self.log(f"SUCCESS: Image saved to: {destination_path}")
             else:
                 self.log(f"ERROR: Disk2vhd failed with exit code: {process.returncode}.")
 
         except Exception as e:
             self.log(f"FATAL: An unexpected error occurred: {e}")
         finally:
-            # 5. Cleanup
+            # 5. Cleanup network connection if used
             if share_path:
                 self.log(f"INFO: Cleaning up network connection to '{share_path}'...")
                 unmap_proc = subprocess.run(["net", "use", share_path, "/delete"], capture_output=True, text=True)

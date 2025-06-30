@@ -66,14 +66,14 @@ class WindowsImagePrepGUI:
         self.populate_step4_frame()  # Capture into WIM
         self.populate_step5_frame()  # Deploy WIM
         
-        # Show initial step
-        self.show_step(1)
-        
         # --- Navigation Controls ---
         self.create_navigation_controls()
         
         # --- Setup Keyboard Shortcuts ---
         self.setup_keyboard_shortcuts()
+        
+        # Show initial step (after all UI elements are created)
+        self.show_step(1)
         
         # --- Log Area (shared across all steps) ---
         log_frame = ttk.LabelFrame(self.root, text="Process Log", padding="5")

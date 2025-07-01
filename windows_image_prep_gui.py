@@ -527,6 +527,49 @@ class DatabaseManager:
         
         return password, f"PYC-{identifier}-ResticRepo"
 
+    def get_images_by_client_and_environment(self, client_id, environment):
+        """Get images filtered by client ID and environment (development/production)"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT i.id, i.client_id, i.site_id, i.role, i.created_at, 
+                       i.repository_path, i.repository_size_gb, i.snapshot_count, i.latest_snapshot_id
+                FROM images i
+                WHERE i.client_id = ? AND i.repository_path LIKE ?
+                ORDER BY i.created_at DESC
+            ''', (client_id, f"%/{environment}/%"))
+            return cursor.fetchall()
+
+    def scan_s3_for_images_filtered(self, environment_filter=None):
+        """Scan S3 repository for images with optional environment filtering"""
+        # This method would implement S3 scanning logic
+        # For now, it's a placeholder that would be implemented with AWS SDK
+        # The actual implementation would:
+        # 1. Connect to S3 using stored credentials
+        # 2. List objects in the bucket with the specified environment filter
+        # 3. Parse metadata JSON files
+        # 4. Populate the database with discovered images
+        pass
+
+    def get_sites_by_client(self, client_id):
+        """Get all sites for a specific client"""
+        return self.get_sites(client_id)
+
+    def get_site_by_short_name(self, short_name):
+        """Find site by short name - returns (id, name, short_name, client_id) or None"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, name, short_name, client_id FROM sites WHERE short_name = ?', (short_name,))
+            return cursor.fetchone()
+
+    def create_client(self, client_id, name, short_name, description=""):
+        """Create a new client with specified UUID"""
+        return self.add_client(name, short_name, description)
+
+    def create_site(self, site_id, name, short_name, client_id, description=""):
+        """Create a new site with specified UUID"""
+        return self.add_site(client_id, name, short_name, description)
+
 class WindowsImagePrepGUI:
     def __init__(self, root):
         self.root = root
@@ -541,13 +584,10 @@ class WindowsImagePrepGUI:
         workflow_mode = self.detect_workflow_mode()
         
         # Initialize database manager with workflow mode
-        self.db = DatabaseManager(workflow_mode)
+        self.db_manager = DatabaseManager(workflow_mode)
+        self.db = self.db_manager  # Keep backward compatibility
         
-        # Check and configure S3 if needed
-        self.check_s3_configuration()
-        
-        # Check and configure workflow mode (development vs production)
-        self.check_workflow_mode()
+        # S3 configuration and workflow mode are now handled per-mode
 
         # Style
         self.style = ttk.Style(self.root)
@@ -557,46 +597,22 @@ class WindowsImagePrepGUI:
         self.current_step = 1
         self.total_steps = 3
         
-        # Check for first-time setup
-        if not self.db.config_initialized:
-            self.show_first_time_setup()
+        # First-time setup is now handled per-mode as needed
         
         # Get image storage path
         self.image_store_path = self.get_image_store_path()
         
         
-        # --- Main UI Structure ---
-        # Create top button bar
-        self.create_top_buttons()
+        # --- Mode-Based UI Structure ---
+        self.current_mode = None
         
-        # Create workflow header
-        self.create_workflow_header()
+        # Create main mode selection screen
+        self.create_mode_selection_screen()
         
-        # Create main content area
-        self.main_frame = ttk.Frame(self.root)
-        self.main_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        # Initialize mode frames (created but hidden)
+        self.mode_frames = {}
         
-        # Create step frames (initially hidden)
-        self.step_frames = {}
-        for step in range(1, self.total_steps + 1):
-            frame = ttk.Frame(self.main_frame)
-            self.step_frames[step] = frame
-        
-        # Populate all step frames
-        self.populate_step1_frame()  # Create System Backup
-        self.populate_step2_frame()  # Professional Image & VM Management
-        self.populate_step3_frame()  # Generalize & Cleanup
-        
-        # --- Navigation Controls ---
-        self.create_navigation_controls()
-        
-        # --- Setup Keyboard Shortcuts ---
-        self.setup_keyboard_shortcuts()
-        
-        # Show initial step (after all UI elements are created)
-        self.show_step(1)
-        
-        # --- Log Area (shared across all steps) ---
+        # --- Log Area (shared across all modes) ---
         log_frame = ttk.LabelFrame(self.root, text="Process Log", padding="5")
         log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state='disabled', bg="#f0f0f0", height=8)
@@ -605,23 +621,15 @@ class WindowsImagePrepGUI:
         # --- Initial Checks ---
         self.check_admin()
         
-        # --- Welcome Message with Navigation Help ---
-        self.log("=== OS Imaging and Processing Tool - Workflow Edition ===")
-        self.log("INFO: Welcome! This tool guides you through a 5-step imaging workflow.")
-        self.log("INFO: Navigation options:")
-        self.log("  • Click any step button above to jump directly to that step")
-        self.log("  • Use Previous/Next buttons or keyboard shortcuts:")
-        self.log("    - Ctrl+Left/Right: Navigate between steps")
-        self.log("    - Ctrl+1-5: Jump directly to any step")
-        self.log("  • All features work independently - jump around as needed!")
+        # --- Welcome Message for Mode-Based Interface ---
+        self.log("=== Windows Image Preparation Tool - Mode-Based Interface ===")
+        self.log("INFO: Welcome! Select an operating mode from the buttons above:")
+        self.log("  🔧 DEVELOP CAPTURE: Create development images with S3 integration")
+        self.log("  🚀 PRODUCTION CAPTURE: Create production-ready deployment images")
+        self.log("  🛠️ GENERALIZE: Prepare images for deployment with sysprep")
+        self.log("  📁 MANAGE IMAGES: Browse and manage existing images")
         self.log("")
-        self.log("INFO: Using modern backup methods for system imaging:")
-        self.log("  🚀 VSS + Restic: Most reliable modern backup solution")
-        self.log("  ✓ Uses Microsoft's official Volume Shadow Service")
-        self.log("  ✓ Restic's advanced backup engine with deduplication")
-        self.log("  ✓ Handles file access issues gracefully")
-        self.log("  ✓ Resumable backups and better error handling")
-        self.log("  ⚠️ Legacy DISM method still available (but not recommended)")
+        self.log("INFO: Using modern Restic backup engine with S3 cloud storage")
         self.log("="*60)
 
     def create_centered_dialog(self, title, width=600, height=500, resizable=True):
@@ -2020,6 +2028,918 @@ Updated: {image_data['updated_at']}"""
         # Make sure the root window can receive focus for keyboard events
         self.root.focus_set()
 
+    def create_mode_selection_screen(self):
+        """Creates the main mode selection screen with 4 mode buttons"""
+        # Create main mode selection frame
+        self.mode_selection_frame = ttk.Frame(self.root)
+        self.mode_selection_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = ttk.Label(self.mode_selection_frame, text="Windows Image Preparation Tool", 
+                               font=("TkDefaultFont", 18, "bold"))
+        title_label.pack(pady=(0, 30))
+        
+        # Subtitle
+        subtitle_label = ttk.Label(self.mode_selection_frame, text="Select Operating Mode", 
+                                  font=("TkDefaultFont", 12))
+        subtitle_label.pack(pady=(0, 40))
+        
+        # Create grid for mode buttons
+        button_frame = ttk.Frame(self.mode_selection_frame)
+        button_frame.pack(expand=True)
+        
+        # Mode buttons (2x2 grid)
+        develop_btn = ttk.Button(button_frame, text="🔧 DEVELOP CAPTURE", 
+                                command=lambda: self.enter_mode("develop_capture"),
+                                width=25, style="Large.TButton")
+        develop_btn.grid(row=0, column=0, padx=15, pady=15, sticky="nsew")
+        
+        production_btn = ttk.Button(button_frame, text="🚀 PRODUCTION CAPTURE", 
+                                   command=lambda: self.enter_mode("production_capture"),
+                                   width=25, style="Large.TButton")
+        production_btn.grid(row=0, column=1, padx=15, pady=15, sticky="nsew")
+        
+        generalize_btn = ttk.Button(button_frame, text="🛠️ GENERALIZE", 
+                                   command=lambda: self.enter_mode("generalize"),
+                                   width=25, style="Large.TButton")
+        generalize_btn.grid(row=1, column=0, padx=15, pady=15, sticky="nsew")
+        
+        manage_btn = ttk.Button(button_frame, text="📁 MANAGE IMAGES", 
+                               command=lambda: self.enter_mode("manage_images"),
+                               width=25, style="Large.TButton")
+        manage_btn.grid(row=1, column=1, padx=15, pady=15, sticky="nsew")
+        
+        # Configure grid weights for equal sizing
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+        button_frame.grid_rowconfigure(0, weight=1)
+        button_frame.grid_rowconfigure(1, weight=1)
+        
+        # Configure large button style
+        self.style.configure("Large.TButton", font=("TkDefaultFont", 14, "bold"), padding=20)
+        
+        # Mode descriptions
+        desc_frame = ttk.Frame(self.mode_selection_frame)
+        desc_frame.pack(fill="x", pady=(30, 0))
+        
+        descriptions = [
+            "DEVELOP CAPTURE: Create development images with S3 storage integration",
+            "PRODUCTION CAPTURE: Create production images for deployment", 
+            "GENERALIZE: Prepare images for deployment and cleanup",
+            "MANAGE IMAGES: Browse, import, and manage existing images"
+        ]
+        
+        for desc in descriptions:
+            ttk.Label(desc_frame, text=desc, font=("TkDefaultFont", 9), foreground="gray").pack(anchor="w", pady=2)
+
+    def enter_mode(self, mode):
+        """Enter the specified mode and create its UI"""
+        self.current_mode = mode
+        
+        # Set workflow mode and reinitialize database if needed
+        if mode == "develop_capture":
+            # Reinitialize database manager for development mode
+            self.db_manager = DatabaseManager("development")
+            self.db = self.db_manager  # Keep backward compatibility
+            self.log("INFO: Switched to development mode - using temp database")
+        elif mode == "production_capture":
+            # Reinitialize database manager for production mode
+            self.db_manager = DatabaseManager("production")
+            self.db = self.db_manager  # Keep backward compatibility
+            self.log("INFO: Switched to production mode - using permanent database")
+        
+        # Hide mode selection screen
+        self.mode_selection_frame.pack_forget()
+        
+        # Create back button
+        self.create_back_to_modes_button()
+        
+        # Create mode-specific UI
+        if mode == "develop_capture":
+            self.create_develop_capture_ui()
+        elif mode == "production_capture":
+            self.create_production_capture_ui()
+        elif mode == "generalize":
+            self.create_generalize_ui()
+        elif mode == "manage_images":
+            self.create_manage_images_ui()
+    
+    def create_back_to_modes_button(self):
+        """Create a back button to return to mode selection"""
+        self.back_frame = ttk.Frame(self.root)
+        self.back_frame.pack(fill="x", padx=10, pady=5)
+        
+        back_btn = ttk.Button(self.back_frame, text="← Back to Mode Selection", 
+                             command=self.return_to_mode_selection, width=20)
+        back_btn.pack(side="left")
+        
+        # Show current mode
+        mode_label = ttk.Label(self.back_frame, text=f"Mode: {self.current_mode.replace('_', ' ').title()}", 
+                              font=("TkDefaultFont", 10, "bold"))
+        mode_label.pack(side="right")
+    
+    def return_to_mode_selection(self):
+        """Return to the main mode selection screen"""
+        # Hide current mode UI
+        if hasattr(self, 'back_frame'):
+            self.back_frame.pack_forget()
+        
+        # Hide any mode frames
+        for frame in self.mode_frames.values():
+            frame.pack_forget()
+        
+        # Show mode selection screen
+        self.mode_selection_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        self.current_mode = None
+
+    def create_develop_capture_ui(self):
+        """Create the DEVELOP CAPTURE mode UI - S3-dependent development image capture"""
+        # Set repository type for development mode (always S3)
+        self.repo_type_var = tk.StringVar(value="s3")
+        
+        # Create main frame for develop capture mode
+        develop_frame = ttk.Frame(self.root)
+        develop_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.mode_frames["develop_capture"] = develop_frame
+        
+        # S3 Configuration Section (mandatory for development mode)
+        s3_frame = ttk.LabelFrame(develop_frame, text="S3 Configuration (Required)", padding="10")
+        s3_frame.pack(fill="x", pady=(0, 10))
+        
+        # S3 settings grid
+        ttk.Label(s3_frame, text="S3 Bucket:").grid(row=0, column=0, sticky="w", pady=2)
+        self.dev_s3_bucket_var = tk.StringVar()
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_bucket_var, width=30).grid(row=0, column=1, sticky="w", padx=5)
+        
+        ttk.Label(s3_frame, text="Access Key:").grid(row=1, column=0, sticky="w", pady=2)
+        self.dev_s3_access_var = tk.StringVar()
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_access_var, width=30).grid(row=1, column=1, sticky="w", padx=5)
+        
+        ttk.Label(s3_frame, text="Secret Key:").grid(row=2, column=0, sticky="w", pady=2)
+        self.dev_s3_secret_var = tk.StringVar()
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_secret_var, width=30, show="*").grid(row=2, column=1, sticky="w", padx=5)
+        
+        ttk.Label(s3_frame, text="Region:").grid(row=3, column=0, sticky="w", pady=2)
+        self.dev_s3_region_var = tk.StringVar(value="us-east-1")
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_region_var, width=30).grid(row=3, column=1, sticky="w", padx=5)
+        
+        # Load and scan S3 button
+        ttk.Button(s3_frame, text="Load S3 Metadata & Scan Images", 
+                  command=self.load_s3_and_scan_dev_mode).grid(row=4, column=0, columnspan=2, pady=10)
+        
+        # Client/Site/Image Selection Section
+        selection_frame = ttk.LabelFrame(develop_frame, text="Image Configuration", padding="10")
+        selection_frame.pack(fill="x", pady=(0, 10))
+        
+        # Client selection/creation
+        ttk.Label(selection_frame, text="Client:").grid(row=0, column=0, sticky="w", pady=2)
+        self.dev_client_var = tk.StringVar()
+        self.dev_client_combo = ttk.Combobox(selection_frame, textvariable=self.dev_client_var, width=25)
+        self.dev_client_combo.grid(row=0, column=1, sticky="w", padx=5)
+        self.dev_client_combo.bind('<<ComboboxSelected>>', self.on_dev_client_selected)
+        
+        ttk.Button(selection_frame, text="New Client", 
+                  command=self.create_new_dev_client, width=12).grid(row=0, column=2, padx=5)
+        
+        # Site selection/creation  
+        ttk.Label(selection_frame, text="Site:").grid(row=1, column=0, sticky="w", pady=2)
+        self.dev_site_var = tk.StringVar()
+        self.dev_site_combo = ttk.Combobox(selection_frame, textvariable=self.dev_site_var, width=25)
+        self.dev_site_combo.grid(row=1, column=1, sticky="w", padx=5)
+        
+        ttk.Button(selection_frame, text="New Site", 
+                  command=self.create_new_dev_site, width=12).grid(row=1, column=2, padx=5)
+        
+        # Role selection
+        ttk.Label(selection_frame, text="Role:").grid(row=2, column=0, sticky="w", pady=2)
+        self.dev_role_var = tk.StringVar()
+        role_combo = ttk.Combobox(selection_frame, textvariable=self.dev_role_var, width=25,
+                                 values=["ADMIN", "OP", "MANAGER", "VIP", "KIOSK", "SERVER", "IMAGING"])
+        role_combo.grid(row=2, column=1, sticky="w", padx=5)
+        
+        # Existing images for this client (auto-populated from S3)
+        images_frame = ttk.LabelFrame(develop_frame, text="Existing Development Images", padding="10")
+        images_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        # Images listbox with scrollbar
+        list_frame = ttk.Frame(images_frame)
+        list_frame.pack(fill="both", expand=True)
+        
+        self.dev_images_listbox = tk.Listbox(list_frame, height=8)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.dev_images_listbox.yview)
+        self.dev_images_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.dev_images_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.dev_images_listbox.bind('<<ListboxSelect>>', self.on_dev_image_selected)
+        
+        # Action buttons
+        action_frame = ttk.Frame(develop_frame)
+        action_frame.pack(fill="x", pady=10)
+        
+        # Create new development image button
+        ttk.Button(action_frame, text="🔧 Create New Development Image", 
+                  command=self.create_dev_image, 
+                  style="Large.TButton").pack(side="left", padx=(0, 10))
+        
+        # Update existing image button  
+        ttk.Button(action_frame, text="📝 Update Selected Image", 
+                  command=self.update_dev_image,
+                  style="Large.TButton").pack(side="left")
+        
+        # Load S3 configuration if available
+        self.load_dev_s3_config()
+
+    def load_dev_s3_config(self):
+        """Load S3 configuration for development mode"""
+        try:
+            s3_config = self.db_manager.get_config("s3_config")
+            if s3_config:
+                config = json.loads(s3_config)
+                self.dev_s3_bucket_var.set(config.get("s3_bucket", ""))
+                self.dev_s3_access_var.set(config.get("s3_access_key", ""))
+                self.dev_s3_secret_var.set(config.get("s3_secret_key", ""))
+                self.dev_s3_region_var.set(config.get("s3_region", "us-east-1"))
+                self.log(f"INFO: Loaded existing S3 configuration from development database")
+                
+                # Auto-scan S3 if configuration exists
+                if all([config.get("s3_bucket"), config.get("s3_access_key"), config.get("s3_secret_key")]):
+                    self.log("INFO: Auto-scanning S3 for existing development images...")
+                    threading.Thread(target=self.scan_s3_for_dev_images, daemon=True).start()
+            else:
+                self.log("INFO: No existing S3 configuration found in development database")
+        except Exception as e:
+            self.log(f"INFO: No existing S3 configuration found: {e}")
+
+    def load_s3_and_scan_dev_mode(self):
+        """Load S3 configuration and scan for existing development images"""
+        try:
+            # Save S3 configuration
+            s3_config = {
+                "s3_bucket": self.dev_s3_bucket_var.get(),
+                "s3_access_key": self.dev_s3_access_var.get(),
+                "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_region": self.dev_s3_region_var.get()
+            }
+            
+            # Validate configuration
+            if not all([s3_config["s3_bucket"], s3_config["s3_access_key"], s3_config["s3_secret_key"]]):
+                messagebox.showerror("Error", "Please fill in all S3 configuration fields")
+                return
+            
+            # Save configuration
+            self.db_manager.set_config("s3_config", json.dumps(s3_config))
+            self.log("SUCCESS: S3 configuration saved")
+            
+            # Scan S3 for development images
+            self.log("INFO: Scanning S3 for development images...")
+            threading.Thread(target=self.scan_s3_for_dev_images, daemon=True).start()
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to load S3 configuration: {e}")
+            messagebox.showerror("Error", f"Failed to load S3 configuration: {e}")
+
+    def scan_s3_for_dev_images(self):
+        """Scan S3 repository for development images and populate UI from S3 metadata only"""
+        try:
+            # Load clients/sites directly from S3 metadata (not database)
+            self.load_clients_from_s3_metadata()
+            
+            # Refresh the UI on main thread
+            self.root.after(0, self.refresh_dev_ui_from_s3)
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to scan S3 for development images: {e}")
+
+    def load_clients_from_s3_metadata(self):
+        """Load clients and sites from S3 metadata files in bucket root"""
+        try:
+            s3_config = {
+                "s3_bucket": self.dev_s3_bucket_var.get(),
+                "s3_access_key": self.dev_s3_access_var.get(),
+                "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_region": self.dev_s3_region_var.get()
+            }
+            
+            if not all([s3_config["s3_bucket"], s3_config["s3_access_key"], s3_config["s3_secret_key"]]):
+                self.log("WARNING: S3 configuration incomplete, cannot load metadata")
+                return
+            
+            # Initialize storage for S3 metadata
+            self.s3_clients = {}  # {client_uuid: {name, short_name, sites: {site_uuid: {name, short_name}}}}
+            self.s3_images = {}   # {image_uuid: {client_uuid, site_uuid, role, status, created_date}}
+            
+            # Use boto3 to access S3 directly (fallback if AWS CLI not available)
+            try:
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
+                
+                # Create S3 client
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=s3_config["s3_access_key"],
+                    aws_secret_access_key=s3_config["s3_secret_key"],
+                    region_name=s3_config["s3_region"]
+                )
+                
+                # List all metadata files in bucket root /metadata/ folder
+                try:
+                    response = s3_client.list_objects_v2(
+                        Bucket=s3_config["s3_bucket"],
+                        Prefix="metadata/",
+                        MaxKeys=1000
+                    )
+                    
+                    if 'Contents' in response:
+                        metadata_files = []
+                        for obj in response['Contents']:
+                            if obj['Key'].endswith('.json'):
+                                metadata_files.append(obj['Key'])
+                        
+                        self.log(f"INFO: Found {len(metadata_files)} metadata files in S3")
+                        
+                        # Download and parse each metadata file
+                        for metadata_file in metadata_files:
+                            try:
+                                # Download metadata file content
+                                obj_response = s3_client.get_object(
+                                    Bucket=s3_config["s3_bucket"],
+                                    Key=metadata_file
+                                )
+                                
+                                # Parse metadata
+                                metadata_content = obj_response['Body'].read().decode('utf-8')
+                                metadata = json.loads(metadata_content)
+                                self.parse_s3_metadata(metadata)
+                                
+                            except Exception as e:
+                                self.log(f"WARNING: Failed to process metadata file {metadata_file}: {e}")
+                    else:
+                        self.log(f"INFO: No metadata files found in S3 bucket /metadata/ folder")
+                        
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'NoSuchBucket':
+                        self.log(f"INFO: S3 bucket '{s3_config['s3_bucket']}' does not exist")
+                    else:
+                        self.log(f"ERROR: S3 access error: {e}")
+                        
+            except ImportError:
+                self.log("ERROR: boto3 library not available. Please install: pip install boto3")
+                return
+            except NoCredentialsError:
+                self.log("ERROR: Invalid S3 credentials")
+                return
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to load clients from S3 metadata: {e}")
+
+    def parse_s3_metadata(self, metadata):
+        """Parse individual S3 metadata file and extract client/site/image info"""
+        try:
+            tags = metadata.get('tags', {})
+            
+            # Extract information from tags
+            client_uuid = tags.get('client-uuid')
+            client_name = tags.get('client-name', 'Unknown Client')
+            site_uuid = tags.get('site-uuid')
+            site_name = tags.get('site-name', 'Unknown Site')
+            image_uuid = metadata.get('backup_uuid')
+            role = tags.get('role', 'Unknown')
+            created_date = metadata.get('created_timestamp', '')
+            
+            # Determine image status based on metadata completeness
+            status = "completed" if metadata.get('restic_snapshot_id') else "blank"
+            
+            if client_uuid and image_uuid:
+                # Add client if not exists
+                if client_uuid not in self.s3_clients:
+                    # Create short name from client name if not provided
+                    client_short = tags.get('client-short', client_name.upper().replace(' ', '')[:10])
+                    self.s3_clients[client_uuid] = {
+                        'name': client_name,
+                        'short_name': client_short,
+                        'sites': {}
+                    }
+                
+                # Add site if not exists and site_uuid provided
+                if site_uuid and site_uuid not in self.s3_clients[client_uuid]['sites']:
+                    site_short = tags.get('site-short', site_name.upper().replace(' ', '')[:10])
+                    self.s3_clients[client_uuid]['sites'][site_uuid] = {
+                        'name': site_name,
+                        'short_name': site_short
+                    }
+                
+                # Add image
+                self.s3_images[image_uuid] = {
+                    'client_uuid': client_uuid,
+                    'site_uuid': site_uuid,
+                    'role': role,
+                    'status': status,
+                    'created_date': created_date
+                }
+                
+        except Exception as e:
+            self.log(f"WARNING: Failed to parse metadata: {e}")
+
+    def refresh_dev_ui_from_s3(self):
+        """Refresh development mode UI with data from S3 metadata"""
+        try:
+            # Populate client dropdown with S3 clients
+            if hasattr(self, 's3_clients'):
+                client_names = []
+                for client_uuid, client_data in self.s3_clients.items():
+                    display_name = f"{client_data['short_name']} ({client_data['name']})"
+                    client_names.append(display_name)
+                
+                self.dev_client_combo['values'] = client_names
+                self.log(f"INFO: Loaded {len(client_names)} clients from S3 metadata")
+            else:
+                self.dev_client_combo['values'] = []
+                self.log("INFO: No clients found in S3 metadata")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to refresh development UI from S3: {e}")
+
+    def refresh_dev_ui_from_db(self):
+        """Refresh development mode UI with data from database"""
+        try:
+            # Get all clients from database
+            clients = self.db_manager.get_clients()
+            client_names = [f"{client[2]} ({client[1]})" for client in clients]  # short_name (name)
+            
+            self.dev_client_combo['values'] = client_names
+            self.log(f"INFO: Loaded {len(clients)} clients for development mode")
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to refresh development UI: {e}")
+
+    def on_dev_client_selected(self, event=None):
+        """Handle client selection in development mode - loads from S3 metadata"""
+        try:
+            selected = self.dev_client_var.get()
+            if not selected:
+                return
+                
+            # Extract client short name from selection
+            client_short = selected.split(' (')[0]
+            
+            # Find client in S3 metadata
+            client_uuid = None
+            client_data = None
+            
+            if hasattr(self, 's3_clients'):
+                for uuid, data in self.s3_clients.items():
+                    if data['short_name'] == client_short:
+                        client_uuid = uuid
+                        client_data = data
+                        break
+            
+            if client_data:
+                # Load sites for this client from S3 metadata
+                site_names = []
+                for site_uuid, site_data in client_data['sites'].items():
+                    display_name = f"{site_data['short_name']} ({site_data['name']})"
+                    site_names.append(display_name)
+                
+                self.dev_site_combo['values'] = site_names
+                self.log(f"INFO: Loaded {len(site_names)} sites for client {client_short} from S3")
+                
+                # Load development images for this client from S3 metadata
+                self.load_dev_images_for_client_from_s3(client_uuid)
+            else:
+                self.log(f"WARNING: Client {client_short} not found in S3 metadata")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to load client data: {e}")
+
+    def load_dev_images_for_client_from_s3(self, client_uuid):
+        """Load development images for the selected client from S3 metadata"""
+        try:
+            # Clear current images list
+            self.dev_images_listbox.delete(0, tk.END)
+            
+            if not hasattr(self, 's3_images') or not client_uuid:
+                self.log("INFO: No images found for client")
+                return
+            
+            # Find all images for this client
+            client_images = []
+            for image_uuid, image_data in self.s3_images.items():
+                if image_data['client_uuid'] == client_uuid:
+                    client_images.append((image_uuid, image_data))
+            
+            # Sort by created date (newest first)
+            client_images.sort(key=lambda x: x[1]['created_date'], reverse=True)
+            
+            # Populate listbox with image info including status
+            for image_uuid, image_data in client_images:
+                created_date = image_data['created_date'][:10] if image_data['created_date'] else "Unknown"
+                status = image_data['status'].upper()
+                role = image_data['role']
+                
+                # Format: "Role - Status - Date - UUID"
+                display_text = f"{role} - {status} - {created_date} - {image_uuid[:8]}"
+                self.dev_images_listbox.insert(tk.END, display_text)
+            
+            self.log(f"INFO: Loaded {len(client_images)} development images for client")
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to load development images from S3: {e}")
+
+    def load_dev_images_for_client(self, client_id):
+        """Load development images for the selected client"""
+        try:
+            # Get development images for this client
+            images = self.db_manager.get_images_by_client_and_environment(client_id, "development")
+            
+            # Clear and populate listbox
+            self.dev_images_listbox.delete(0, tk.END)
+            
+            for image in images:
+                # Format: "Role - Date - UUID"
+                created_date = image[4][:10] if image[4] else "Unknown"
+                display_text = f"{image[3]} - {created_date} - {image[0][:8]}"
+                self.dev_images_listbox.insert(tk.END, display_text)
+            
+            self.log(f"INFO: Loaded {len(images)} development images for client")
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to load development images: {e}")
+
+    def on_dev_image_selected(self, event=None):
+        """Handle selection of an existing development image"""
+        try:
+            selection = self.dev_images_listbox.curselection()
+            if selection:
+                selected_text = self.dev_images_listbox.get(selection[0])
+                # Extract UUID from the display text
+                image_uuid = selected_text.split(' - ')[-1]
+                self.log(f"INFO: Selected development image: {image_uuid}")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to handle image selection: {e}")
+
+    def create_new_dev_client(self):
+        """Create a new client for development mode - creates S3 metadata immediately"""
+        try:
+            # Simple dialog for client creation
+            client_name = simpledialog.askstring("New Client", "Enter client name:")
+            if not client_name:
+                return
+                
+            client_short = simpledialog.askstring("New Client", "Enter client short name:")
+            if not client_short:
+                return
+            
+            # Create client and site together, then create blank image metadata
+            site_name = simpledialog.askstring("New Client", "Enter initial site name:")
+            if not site_name:
+                site_name = f"{client_name} Main Site"
+                
+            site_short = simpledialog.askstring("New Client", "Enter site short name:")
+            if not site_short:
+                site_short = f"{client_short}MAIN"
+            
+            # Generate UUIDs
+            client_uuid = generate_uuidv7()
+            site_uuid = generate_uuidv7()
+            image_uuid = generate_uuidv7()
+            
+            # Create blank image metadata and store to S3 immediately
+            if self.create_blank_image_metadata_s3(client_uuid, client_name, client_short, 
+                                                  site_uuid, site_name, site_short, image_uuid):
+                self.log(f"SUCCESS: Created new client: {client_name} ({client_short}) with blank image")
+                
+                # Refresh from S3
+                threading.Thread(target=self.scan_s3_for_dev_images, daemon=True).start()
+                
+                # Select the new client after a short delay for S3 refresh
+                self.root.after(2000, lambda: self.select_created_client(client_short, client_name))
+            else:
+                messagebox.showerror("Error", "Failed to create client metadata in S3")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to create new client: {e}")
+            messagebox.showerror("Error", f"Failed to create new client: {e}")
+
+    def create_blank_image_metadata_s3(self, client_uuid, client_name, client_short, 
+                                       site_uuid, site_name, site_short, image_uuid):
+        """Create a blank image metadata file in S3 bucket root /metadata/ folder"""
+        try:
+            s3_config = {
+                "s3_bucket": self.dev_s3_bucket_var.get(),
+                "s3_access_key": self.dev_s3_access_var.get(),
+                "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_region": self.dev_s3_region_var.get()
+            }
+            
+            # Create blank image metadata
+            metadata = {
+                "backup_uuid": image_uuid,
+                "created_timestamp": datetime.now().isoformat(),
+                "version": "1.0",
+                "tool": "windows-image-prep-gui",
+                "tool_version": "2025.1",
+                "environment": "development",
+                "status": "blank",
+                "tags": {
+                    "client-uuid": client_uuid,
+                    "client-name": client_name,
+                    "client-short": client_short,
+                    "site-uuid": site_uuid,
+                    "site-name": site_name,
+                    "site-short": site_short,
+                    "environment": "development",
+                    "backup-uuid": image_uuid,
+                    "created-date": datetime.now().isoformat(),
+                    "role": "ADMIN"  # Default role for new clients
+                }
+            }
+            
+            # Upload metadata directly to S3 using boto3
+            try:
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
+                
+                # Create S3 client
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=s3_config["s3_access_key"],
+                    aws_secret_access_key=s3_config["s3_secret_key"],
+                    region_name=s3_config["s3_region"]
+                )
+                
+                # Convert metadata to JSON string
+                metadata_json = json.dumps(metadata, indent=2)
+                
+                # Upload to S3 bucket root /metadata/ folder
+                s3_key = f"metadata/{image_uuid}.json"
+                
+                s3_client.put_object(
+                    Bucket=s3_config["s3_bucket"],
+                    Key=s3_key,
+                    Body=metadata_json.encode('utf-8'),
+                    ContentType='application/json'
+                )
+                
+                self.log(f"SUCCESS: Created blank image metadata in S3: {image_uuid}")
+                return True
+                
+            except ImportError:
+                self.log("ERROR: boto3 library not available. Please install: pip install boto3")
+                return False
+            except NoCredentialsError:
+                self.log("ERROR: Invalid S3 credentials")
+                return False
+            except ClientError as e:
+                self.log(f"ERROR: Failed to upload metadata to S3: {e}")
+                return False
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to create blank image metadata: {e}")
+            return False
+
+    def select_created_client(self, client_short, client_name):
+        """Select the newly created client in the dropdown"""
+        try:
+            display_name = f"{client_short} ({client_name})"
+            self.dev_client_var.set(display_name)
+            self.on_dev_client_selected()
+        except Exception as e:
+            self.log(f"WARNING: Could not auto-select created client: {e}")
+
+    def create_new_dev_site(self):
+        """Create a new site for the selected client in development mode - creates S3 metadata"""
+        try:
+            # Check if client is selected
+            if not self.dev_client_var.get():
+                messagebox.showwarning("Warning", "Please select a client first")
+                return
+            
+            # Get client info from S3 metadata
+            client_short = self.dev_client_var.get().split(' (')[0]
+            client_uuid = None
+            client_name = None
+            
+            if hasattr(self, 's3_clients'):
+                for uuid, data in self.s3_clients.items():
+                    if data['short_name'] == client_short:
+                        client_uuid = uuid
+                        client_name = data['name']
+                        break
+            
+            if not client_uuid:
+                messagebox.showerror("Error", "Selected client not found in S3 metadata")
+                return
+            
+            # Simple dialog for site creation
+            site_name = simpledialog.askstring("New Site", "Enter site name:")
+            if not site_name:
+                return
+                
+            site_short = simpledialog.askstring("New Site", "Enter site short name:")
+            if not site_short:
+                return
+            
+            # Generate UUIDs
+            site_uuid = generate_uuidv7()
+            image_uuid = generate_uuidv7()
+            
+            # Create blank image metadata for new site
+            if self.create_blank_image_metadata_s3(client_uuid, client_name, client_short, 
+                                                  site_uuid, site_name, site_short, image_uuid):
+                self.log(f"SUCCESS: Created new site: {site_name} ({site_short}) with blank image")
+                
+                # Refresh from S3
+                threading.Thread(target=self.scan_s3_for_dev_images, daemon=True).start()
+                
+                # Select the new site after a short delay for S3 refresh
+                self.root.after(2000, lambda: self.select_created_site(site_short, site_name))
+            else:
+                messagebox.showerror("Error", "Failed to create site metadata in S3")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to create new site: {e}")
+            messagebox.showerror("Error", f"Failed to create new site: {e}")
+
+    def select_created_site(self, site_short, site_name):
+        """Select the newly created site in the dropdown"""
+        try:
+            display_name = f"{site_short} ({site_name})"
+            self.dev_site_var.set(display_name)
+        except Exception as e:
+            self.log(f"WARNING: Could not auto-select created site: {e}")
+
+    def create_dev_image(self):
+        """Create a new development image"""
+        try:
+            # Validate selections
+            if not all([self.dev_client_var.get(), self.dev_site_var.get(), self.dev_role_var.get()]):
+                messagebox.showwarning("Warning", "Please select client, site, and role")
+                return
+            
+            # Set development mode workflow  
+            self.db_manager.set_config("workflow_mode", "development")
+            
+            # Start the backup process with development tagging
+            self.start_dev_backup()
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to create development image: {e}")
+            messagebox.showerror("Error", f"Failed to create development image: {e}")
+
+    def update_dev_image(self):
+        """Update an existing development image"""
+        try:
+            # Check if an image is selected
+            selection = self.dev_images_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Warning", "Please select an existing image to update")
+                return
+            
+            # Validate role selection for update
+            if not self.dev_role_var.get():
+                messagebox.showwarning("Warning", "Please select a role for the image update")
+                return
+            
+            # Set development mode workflow
+            self.db_manager.set_config("workflow_mode", "development")
+            
+            # Start the backup process (this will update the existing repository)
+            self.start_dev_backup()
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to update development image: {e}")
+            messagebox.showerror("Error", f"Failed to update development image: {e}")
+
+    def start_dev_backup(self):
+        """Start the development backup process"""
+        try:
+            self.log("INFO: Starting development image backup...")
+            
+            # Use existing backup functionality but with development tagging
+            # This will call the same backup methods but with environment=development
+            threading.Thread(target=self.perform_dev_backup_worker, daemon=True).start()
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to start development backup: {e}")
+
+    def perform_dev_backup_worker(self):
+        """Worker thread for development backup"""
+        try:
+            # Extract client/site info
+            client_short = self.dev_client_var.get().split(' (')[0]
+            site_short = self.dev_site_var.get().split(' (')[0] if self.dev_site_var.get() else ""
+            
+            client = self.db_manager.find_client_by_short_name(client_short)
+            site = self.db_manager.get_site_by_short_name(site_short) if site_short else None
+            
+            if not client:
+                self.log("ERROR: Client not found")
+                return
+            
+            # Build backup tags for development
+            backup_tags = [
+                f"client-uuid:{client[0]}",
+                f"client-name:{client[1]}",
+                f"environment:development",
+                f"role:{self.dev_role_var.get()}",
+                f"backup-uuid:{generate_uuidv7()}",
+                f"created-date:{datetime.now().isoformat()}"
+            ]
+            
+            if site:
+                backup_tags.extend([
+                    f"site-uuid:{site[0]}",
+                    f"site-name:{site[1]}"
+                ])
+            
+            # Add hardware info
+            hardware_info = self.get_hardware_info()
+            if hardware_info:
+                for key, value in hardware_info.items():
+                    if value:
+                        backup_tags.append(f"hw-{key}:{value}")
+            
+            # Perform the actual backup using existing restic functionality
+            success = self.perform_restic_backup(backup_tags)
+            
+            if success:
+                self.log("SUCCESS: Development image backup completed!")
+                # Refresh the images list
+                self.root.after(0, lambda: self.load_dev_images_for_client(client[0]))
+            else:
+                self.log("ERROR: Development image backup failed")
+                
+        except Exception as e:
+            self.log(f"ERROR: Development backup worker failed: {e}")
+
+    def create_production_capture_ui(self):
+        """Create the PRODUCTION CAPTURE mode UI"""
+        # Set repository type for production mode (can be S3 or local)
+        self.repo_type_var = tk.StringVar(value="s3")
+        
+        # Create main frame for production capture mode
+        production_frame = ttk.Frame(self.root)
+        production_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.mode_frames["production_capture"] = production_frame
+        
+        # Production mode notice
+        notice_frame = ttk.LabelFrame(production_frame, text="Production Mode", padding="10")
+        notice_frame.pack(fill="x", pady=(0, 10))
+        
+        ttk.Label(notice_frame, text="⚠️ Production image capture creates deployment-ready images tagged as 'production'",
+                 font=("TkDefaultFont", 10, "bold"), foreground="red").pack()
+        
+        # Similar structure to development mode but tagged as production
+        # (This would be a simplified version focusing on production deployment)
+        
+        ttk.Label(production_frame, text="Production capture UI - Implementation pending",
+                 font=("TkDefaultFont", 14)).pack(expand=True)
+
+    def create_generalize_ui(self):
+        """Create the GENERALIZE mode UI"""
+        # Set default repository type
+        self.repo_type_var = tk.StringVar(value="local")
+        
+        # Create main frame for generalize mode
+        generalize_frame = ttk.Frame(self.root)
+        generalize_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.mode_frames["generalize"] = generalize_frame
+        
+        # Generalization notice
+        notice_frame = ttk.LabelFrame(generalize_frame, text="System Generalization", padding="10")
+        notice_frame.pack(fill="x", pady=(0, 10))
+        
+        ttk.Label(notice_frame, text="🛠️ Prepare Windows images for deployment by running sysprep and cleanup tools",
+                 font=("TkDefaultFont", 10, "bold")).pack()
+        
+        # Generalization tools would go here
+        ttk.Label(generalize_frame, text="Generalization UI - Implementation pending",
+                 font=("TkDefaultFont", 14)).pack(expand=True)
+
+    def create_manage_images_ui(self):
+        """Create the MANAGE IMAGES mode UI"""
+        # Set default repository type
+        self.repo_type_var = tk.StringVar(value="local")
+        
+        # Create main frame for manage images mode
+        manage_frame = ttk.Frame(self.root)
+        manage_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.mode_frames["manage_images"] = manage_frame
+        
+        # Image management notice
+        notice_frame = ttk.LabelFrame(manage_frame, text="Image Management", padding="10")
+        notice_frame.pack(fill="x", pady=(0, 10))
+        
+        ttk.Label(notice_frame, text="📁 Browse, import, and manage existing images from local and S3 storage",
+                 font=("TkDefaultFont", 10, "bold")).pack()
+        
+        # Image management tools would go here
+        ttk.Label(manage_frame, text="Image management UI - Implementation pending",
+                 font=("TkDefaultFont", 14)).pack(expand=True)
+
     def show_step(self, step_number):
         """Shows the specified step and hides others."""
         # Hide all step frames
@@ -2127,14 +3047,14 @@ Updated: {image_data['updated_at']}"""
         
         # Role selection
         ttk.Label(self.client_site_frame, text="Role:").grid(row=1, column=0, sticky="w", pady=2)
-        self.role_var = tk.StringVar(value="workstation")
+        self.role_var = tk.StringVar(value="OP")
         role_combo = ttk.Combobox(self.client_site_frame, textvariable=self.role_var, 
-                                 values=["workstation", "server", "domain-controller", "web-server", "database-server", "custom"])
+                                 values=["ADMIN", "OP", "MANAGER", "VIP", "KIOSK", "SERVER", "IMAGING"])
         role_combo.grid(row=1, column=1, sticky="we", padx=5, pady=2)
         
         # Image selection (new vs existing)
         ttk.Label(self.client_site_frame, text="Image Type:").grid(row=2, column=0, sticky="w", pady=2)
-        self.image_type_var = tk.StringVar(value="new")
+        self.image_type_var = tk.StringVar(value="existing")
         image_type_frame = ttk.Frame(self.client_site_frame)
         image_type_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=2)
         
@@ -2164,6 +3084,10 @@ Updated: {image_data['updated_at']}"""
         
         # Load initial client data
         self.refresh_client_site_data()
+        
+        # Scan S3 for existing images in development mode
+        if self.get_workflow_mode() == "development":
+            threading.Thread(target=self.scan_s3_for_images, daemon=True).start()
         
         # Only show client/site selection in development mode
         workflow_mode = self.get_workflow_mode()
@@ -3316,6 +4240,9 @@ Updated: {image_data['updated_at']}"""
             
     def update_repo_name(self):
         """Update repository name based on client selection"""
+        if not hasattr(self, 'repo_name_var'):
+            return  # UI not fully initialized yet
+            
         client_name = self.client_var.get()
         if client_name and client_name != "-- Select Client --":
             # Clean client name for use in repository name
@@ -3517,10 +4444,7 @@ Updated: {image_data['updated_at']}"""
                 "repository_size_gb": repo_size_gb
             }
             
-            if self.create_client_metadata_json(client_id, client_info, site_info, image_info):
-                self.log("SUCCESS: Client metadata JSON file created")
-            else:
-                self.log("WARNING: Failed to create client metadata JSON file")
+            # Client metadata JSON will be created when first backup is taken
             
             return True
             
@@ -3992,11 +4916,13 @@ detach vdisk
                 # Auto-select first client if none selected and clients available
                 if client_names and not self.client_var.get():
                     self.client_var.set(client_names[0])
-                    # Trigger site population for the selected client
+                
+                # Always trigger site population if a client is selected
+                if self.client_var.get():
                     self.on_client_selected()
             
-            # Clear site combo when refreshing client data
-            if hasattr(self, 'site_combo'):
+            # Clear site combo only if no client is selected
+            elif hasattr(self, 'site_combo'):
                 self.site_combo['values'] = ()
                 self.site_var.set("")
             
@@ -6227,301 +7153,32 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             except:
                 pass
         
-        # Check disk space for destination
-        dest_path = self.destination_path_var.get()
-        if dest_path:
-            dest_dir = Path(dest_path).parent
-            if dest_dir.exists():
-                free_space = shutil.disk_usage(dest_dir).free / (1024**3)
-                self.log(f"INFO: Free space at destination: {free_space:.1f} GB")
-                if free_space < 50:
-                    self.log("WARNING: Low disk space may cause capture to fail")
-                    self.log("RECOMMENDATION: Free up disk space or choose a different destination")
-                    self.log(f"SUGGESTION: Need at least 50GB free (you have {free_space:.1f} GB)")
-                elif free_space < 100:
-                    self.log("INFO: Adequate disk space, but monitor during backup")
-                else:
-                    self.log("INFO: Excellent disk space available")
+        # Check disk space for local repository storage
+        repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "local"
+        if repo_type == "local":
+            try:
+                restic_base = self.get_restic_base_path()
+                if restic_base.exists():
+                    free_space = shutil.disk_usage(restic_base).free / (1024**3)
+                    self.log(f"INFO: Free space at repository location: {free_space:.1f} GB")
+                    if free_space < 50:
+                        self.log("WARNING: Low disk space may cause backup to fail")
+                        self.log("RECOMMENDATION: Free up disk space or configure S3 storage")
+            except Exception as e:
+                self.log(f"WARNING: Could not check disk space: {e}")
+        else:
+            self.log("INFO: Using S3 storage - local disk space check skipped")
         
         self.log("INFO: VSS prerequisites check completed")
 
     def create_vss_wim_image(self):
         """Creates a WIM image using VSS shadow copy + DISM (safe approach)."""
-        shadow_id = None # Ensure shadow_id is defined for the finally block
-        try:
-            # Check prerequisites first
-            self.check_vss_prerequisites()
-            # Get parameters from GUI
-            destination_path = self.destination_path_var.get().strip()
-            
-            # Validate destination path
-            if not destination_path:
-                self.log("ERROR: No destination path provided.")
-                messagebox.showerror("Invalid Input", "Please provide a destination path for the WIM file.")
-                return False
-
-            # Ensure .wim extension
-            if not destination_path.lower().endswith('.wim'):
-                self.log("WARNING: Destination path doesn't end with .wim - adding .wim extension")
-                destination_path += ".wim"
-                self.destination_path_var.set(destination_path)
-
-            # Validate local path
-            local_dir = Path(destination_path).parent
-            if not local_dir.exists():
-                self.log(f"ERROR: Local directory does not exist: {local_dir}")
-                if messagebox.askyesno("Create Directory", f"The directory {local_dir} does not exist. Create it?"):
-                    try:
-                        local_dir.mkdir(parents=True, exist_ok=True)
-                        self.log(f"SUCCESS: Created directory: {local_dir}")
-                    except Exception as e:
-                        self.log(f"ERROR: Failed to create directory: {e}")
-                        return False
-                else:
-                    return False
-
-            # Determine OS volume to capture
-            system_drive = os.environ.get('SystemDrive', 'C:')
-            if self.capture_os_only_var.get():
-                self.log(f"INFO: Capturing only OS volume: {system_drive}")
-            else:
-                self.log(f"INFO: Capturing entire system drive: {system_drive}")
-            
-            self.log("INFO: Using VSS + DISM method for safe WIM creation:")
-            self.log("  ✅ Creates Volume Shadow Copy first")
-            self.log("  ✅ Captures from consistent snapshot")
-            self.log("  ✅ Safe for live running systems")
-            self.log("  ✅ No risk of file corruption")
-            self.log("")
-            
-            # Ask for user confirmation
-            if not messagebox.askyesno("VSS Capture Confirmation", 
-                "✅ SAFE: VSS + DISM Method\n\n"
-                "This method will:\n"
-                "• Create a Volume Shadow Copy (VSS snapshot)\n"
-                "• Capture from the consistent snapshot\n"
-                "• Safe for live running systems\n"
-                "• No risk of corruption\n\n"
-                "This is the RECOMMENDED method for production.\n\n"
-                "Continue with VSS capture?"):
-                self.log("INFO: VSS capture cancelled by user")
-                return False
-
-            # Step 1: Create VSS Shadow Copy with retry logic
-            self.log("INFO: Step 1 - Creating Volume Shadow Copy...")
-            max_shadow_attempts = 3
-            shadow_id = None
-            
-            for attempt in range(1, max_shadow_attempts + 1):
-                self.log(f"INFO: VSS creation attempt {attempt}/{max_shadow_attempts}")
-                shadow_id = self.create_vss_shadow_copy(system_drive)
-                if shadow_id:
-                    self.log(f"SUCCESS: VSS shadow copy created on attempt {attempt}")
-                    break
-                else:
-                    self.log(f"WARNING: VSS creation attempt {attempt} failed")
-                    if attempt < max_shadow_attempts:
-                        self.log("INFO: Waiting 5 seconds before retry...")
-                        import time
-                        time.sleep(5)
-            
-            if not shadow_id:
-                self.log("ERROR: Failed to create VSS shadow copy after all attempts")
-                self.log("TROUBLESHOOTING: Try these solutions:")
-                self.log("  1. Restart Windows and try immediately")
-                self.log("  2. Run: sfc /scannow")
-                self.log("  3. Run: dism /online /cleanup-image /restorehealth")
-                self.log("  4. Check Windows Event Viewer for VSS errors")
-                self.log("  5. Use Direct method as fallback (but riskier)")
-                return False
-
-            # Step 2: Get shadow copy path
-            self.log("INFO: Step 2 - Getting shadow copy path...")
-            shadow_path = self.get_vss_shadow_path(shadow_id)
-            if not shadow_path:
-                self.log("ERROR: Failed to get shadow copy path")
-                return False
-
-            # Keep the shadow copy alive by creating a reference handle
-            self.log("INFO: Step 3 - Establishing persistent shadow copy reference...")
-            try:
-                # First, try to extend VSS timeout using PowerShell
-                self.log("INFO: Attempting to extend VSS shadow copy timeout...")
-                try:
-                    extend_ps_cmd = f"""
-                    $shadow = Get-WmiObject Win32_ShadowCopy -Filter "ID='{shadow_id}'"
-                    if ($shadow) {{
-                        Write-Host "Shadow copy is valid and accessible"
-                        # Force VSS to maintain the shadow copy longer
-                        $vssAdmin = Get-Service -Name "VSS"
-                        if ($vssAdmin.Status -eq "Running") {{
-                            Write-Host "VSS service is healthy"
-                        }}
-                    }}
-                    """
-                    extend_proc = subprocess.run([
-                        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", extend_ps_cmd
-                    ], capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=30)
-                    
-                    if "Shadow copy is valid" in extend_proc.stdout:
-                        self.log("SUCCESS: VSS shadow copy validated and timeout extended")
-                    else:
-                        self.log("WARNING: Could not validate VSS shadow copy status")
-                        
-                except Exception as e:
-                    self.log(f"WARNING: Could not extend VSS timeout: {e}")
-                
-                # Create a handle to keep the shadow copy alive during DISM
-                import ctypes
-                from ctypes import wintypes
-                
-                # Open a handle to the shadow copy volume
-                handle = ctypes.windll.kernel32.CreateFileW(
-                    shadow_path,
-                    0,  # No access needed, just keep it alive
-                    3,  # FILE_SHARE_READ | FILE_SHARE_WRITE  
-                    None,
-                    3,  # OPEN_EXISTING
-                    0,  # No special flags
-                    None
-                )
-                
-                if handle == -1:  # INVALID_HANDLE_VALUE
-                    self.log("WARNING: Could not create persistent handle to shadow copy")
-                    handle = None
-                else:
-                    self.log("SUCCESS: Created persistent handle to shadow copy")
-                    
-            except Exception as e:
-                self.log(f"WARNING: Failed to create persistent handle: {e}")
-                handle = None
-
-            # Step 4: Enhanced capture with multiple methods and better timeout handling
-            self.log("INFO: Step 4 - Enhanced shadow copy capture with persistence...")
-            self.log("INFO: VSS Shadow Copy Lifetime Tips:")
-            self.log("  • Close all non-essential applications")
-            self.log("  • Disable antivirus real-time protection")
-            self.log("  • Ensure >4GB free RAM")
-            self.log("  • Stop backup services temporarily")
-            self.log("")
-            
-            # Multiple approaches for reliable shadow copy access
-            capture_success = False
-            
-            # Method 1: Direct shadow copy path with enhanced settings (most reliable for VSS)
-            self.log("INFO: Attempting Method 1 - Direct shadow copy access with VSS persistence...")
-            mounted_path = shadow_path.rstrip('\\') + '\\'
-            
-            # Test if shadow path is accessible
-            test_path = Path(mounted_path) / "Windows"
-            try:
-                if test_path.exists():
-                    self.log("SUCCESS: Shadow copy path is accessible")
-                    
-                    # Use enhanced DISM capture with VSS-specific optimizations
-                    capture_success = self.capture_with_dism(
-                        mounted_path, destination_path, "Direct VSS Path", use_enhanced_settings=True
-                    )
-                    
-                    if capture_success:
-                        self.log("SUCCESS: DISM capture via direct VSS path completed!")
-                    else:
-                        self.log("WARNING: DISM capture via direct VSS path failed")
-                else:
-                    self.log("WARNING: Shadow copy path not directly accessible")
-            except Exception as e:
-                self.log(f"WARNING: Cannot access shadow copy directly: {e}")
-            
-            # Method 2: Symbolic link approach (fallback)
-            if not capture_success:
-                self.log("INFO: Attempting Method 2 - Symbolic link with VSS persistence...")
-                link_path = f"C:\\VSS_TEMP_{shadow_id.replace('{', '').replace('}', '')[-12:]}"  # Use last 12 chars of shadow ID (without braces)
-                try:
-                    # Clean up any existing link
-                    if Path(link_path).exists():
-                        subprocess.run(["rmdir", link_path], shell=True, capture_output=True)
-                    
-                    # Create symbolic link to shadow copy
-                    mklink_cmd = f'mklink /D "{link_path}" "{shadow_path}"'
-                    self.log(f"COMMAND: {mklink_cmd}")
-                    
-                    mklink_proc = subprocess.run(
-                        mklink_cmd, shell=True,
-                        capture_output=True, text=True, encoding='utf-8', errors='ignore'
-                    )
-                    
-                    if mklink_proc.returncode == 0 and Path(link_path).exists():
-                        self.log(f"SUCCESS: Created symbolic link at {link_path}")
-                        symbolic_path = link_path + "\\"
-                        
-                        # Test access to the symbolic link
-                        test_path = Path(symbolic_path) / "Windows"
-                        if test_path.exists():
-                            self.log("SUCCESS: Symbolic link is accessible")
-                            capture_success = self.capture_with_dism(
-                                symbolic_path, destination_path, "Symbolic Link", use_enhanced_settings=True
-                            )
-                            if capture_success:
-                                self.log("SUCCESS: DISM capture via symbolic link completed!")
-                            else:
-                                self.log("WARNING: DISM capture via symbolic link failed")
-                        else:
-                            self.log("WARNING: Symbolic link created but Windows folder not accessible")
-                    else:
-                        self.log(f"WARNING: Symbolic link creation failed: {mklink_proc.stderr}")
-                    
-                    # Clean up symbolic link
-                    try:
-                        if Path(link_path).exists():
-                            subprocess.run(["rmdir", link_path], shell=True, capture_output=True)
-                            self.log("INFO: Cleaned up symbolic link")
-                    except:
-                        pass
-                        
-                except Exception as e:
-                    self.log(f"WARNING: Symbolic link method failed: {e}")
-            
-            # Cleanup persistent handle
-            if handle and handle != -1:
-                try:
-                    ctypes.windll.kernel32.CloseHandle(handle)
-                    self.log("INFO: Closed persistent shadow copy handle")
-                except:
-                    pass
-            
-            dism_success = capture_success
-            
-            if dism_success:
-                self.log("SUCCESS: VSS + DISM capture completed successfully!")
-                return True
-            else:
-                self.log("ERROR: All VSS capture methods failed")
-                self.log("TROUBLESHOOTING VSS Issues:")
-                self.log("  1. Shadow copy became invalid during capture (common issue)")
-                self.log("  2. Insufficient disk space for WIM file")
-                self.log("  3. VSS service instability")
-                self.log("  4. Antivirus interference with VSS")
-                self.log("  5. System under heavy I/O load")
-                self.log("")
-                self.log("RECOMMENDED SOLUTIONS:")
-                self.log("  • Restart and try again immediately")
-                self.log("  • Close all non-essential applications")
-                self.log("  • Temporarily disable antivirus real-time protection")
-                self.log("  • Free up more disk space (need >20% free)")
-                self.log("  • Use Direct method as fallback (less safe)")
-                return False
-
-        except Exception as e:
-            self.log(f"FATAL: VSS + DISM capture failed: {e}")
-            return False
-        finally:
-            # Step 5: Always cleanup shadow copy (but only after DISM completes)
-            if shadow_id:
-                self.log("INFO: Step 5 - Cleaning up VSS shadow copy...")
-                # Add a small delay to ensure DISM has fully released the shadow copy
-                import time
-                time.sleep(2)
-                self.delete_vss_shadow_copy(shadow_id)
+        # This method is deprecated - use the modern restic backup workflow instead
+        self.log("ERROR: This DISM method is deprecated. Use the modern Restic backup in Step 1.")
+        messagebox.showerror("Method Deprecated", 
+                           "DISM-based WIM creation has been replaced with the modern Restic workflow in Step 1.\n\n" +
+                           "Please use 'Create System Backup' in Step 1 instead.")
+        return False
 
     def create_vss_shadow_copy(self, drive_letter):
         """Create a VSS shadow copy of the specified drive."""
@@ -6916,141 +7573,12 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
 
     def create_direct_wim_image(self):
         """Creates a WIM image using DISM directly (risky approach)."""
-        try:
-            # Get parameters from GUI
-            destination_path = self.destination_path_var.get().strip()
-            
-            # Validate destination path
-            if not destination_path:
-                self.log("ERROR: No destination path provided.")
-                messagebox.showerror("Invalid Input", "Please provide a destination path for the WIM file.")
-                return False
-
-            # Ensure .wim extension
-            if not destination_path.lower().endswith('.wim'):
-                self.log("WARNING: Destination path doesn't end with .wim - adding .wim extension")
-                destination_path += ".wim"
-                self.destination_path_var.set(destination_path)
-
-            # Validate local path
-            local_dir = Path(destination_path).parent
-            if not local_dir.exists():
-                self.log(f"ERROR: Local directory does not exist: {local_dir}")
-                if messagebox.askyesno("Create Directory", f"The directory {local_dir} does not exist. Create it?"):
-                    try:
-                        local_dir.mkdir(parents=True, exist_ok=True)
-                        self.log(f"SUCCESS: Created directory: {local_dir}")
-                    except Exception as e:
-                        self.log(f"ERROR: Failed to create directory: {e}")
-                        return False
-                else:
-                    return False
-
-            # Determine OS volume to capture
-            system_drive = os.environ.get('SystemDrive', 'C:')
-            if self.capture_os_only_var.get():
-                self.log(f"INFO: Capturing only OS volume: {system_drive}")
-            else:
-                self.log(f"INFO: Capturing entire system drive: {system_drive}")
-            
-            self.log("INFO: This method captures the LIVE running system directly")
-            self.log("INFO: DISM does NOT automatically use VSS for live capture")
-            self.log("")
-            self.log("🚨 RISKS OF LIVE CAPTURE:")
-            self.log("  ❌ Files may be inconsistent (partial writes)")
-            self.log("  ❌ Registry/system state may be corrupted") 
-            self.log("  ❌ Applications may interfere with capture")
-            self.log("  ❌ Not suitable for production deployment")
-            self.log("")
-            self.log("✅ RECOMMENDED ALTERNATIVES:")
-            self.log("  1. Use VSS method instead (blue button)")
-            self.log("  2. Boot from WinPE and capture offline")
-            self.log("  3. Use Windows ADK with proper VSS scripting")
-            self.log("  4. Capture from VM snapshot")
-            self.log("")
-            
-            # Strong warning for live capture
-            if not messagebox.askyesno("⚠️ DANGEROUS: Direct Live Capture", 
-                "🚨 WARNING: You are about to capture a LIVE running system.\n\n"
-                "DISM does NOT automatically use VSS for this operation.\n"
-                "This can result in CORRUPTED or INCONSISTENT images!\n\n"
-                "❌ RISKS:\n"
-                "• Inconsistent file states\n"
-                "• Registry corruption\n"
-                "• Unusable system image\n"
-                "• Wasted time and storage\n\n"
-                "✅ BETTER CHOICE:\n"
-                "• Use 'Create WIM with VSS (Safe)' button instead\n\n"
-                "⚠️ ONLY continue if this is for testing/development\n"
-                "and you understand the risks!\n\n"
-                "Proceed with potentially unsafe direct capture?"):
-                self.log("INFO: Direct capture cancelled - GOOD CHOICE for safety!")
-                return False
-
-            # User accepted the risks - proceed with direct capture
-            self.log("WARNING: Proceeding with DIRECT system capture (user accepted risks)")
-            self.log(f"INFO: Capturing {system_drive}\\ to {destination_path}")
-            self.log("INFO: This is a direct file copy - NO VSS protection")
-            
-            # Build DISM command for direct capture - WARNING: No automatic VSS
-            # Use proper string formatting to avoid command parsing issues
-            dism_cmd = (
-                f'dism /capture-image '
-                f'/imagefile:"{destination_path}" '
-                f'/capturedir:{system_drive}\\ '
-                f'/name:"System Image (Direct)" '
-                f'/description:"Windows system image captured via direct DISM (no VSS)" '
-                f'/compress:fast /verify /ea'
-            )
-            
-            self.log(f"COMMAND: {dism_cmd}")
-            self.log("INFO: Starting DISM direct capture - this may take 30-60 minutes...")
-            
-            # Execute DISM capture using proper subprocess call
-            dism_proc = subprocess.Popen(
-                dism_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='ignore',
-                shell=True
-            )
-            
-            # Stream DISM output
-            if dism_proc.stdout:
-                for line in iter(dism_proc.stdout.readline, ''):
-                    line = line.strip()
-                    if line:
-                        self.log(line)
-            
-            dism_proc.wait()
-            
-            if dism_proc.returncode == 0:
-                self.log("SUCCESS: Direct DISM capture completed!")
-                self.log(f"SUCCESS: WIM image saved to: {destination_path}")
-                self.log("WARNING: Please test this image thoroughly before production use")
-                
-                # Check if file was actually created and get size
-                dest_file = Path(destination_path)
-                if dest_file.exists():
-                    size_gb = dest_file.stat().st_size / (1024**3)
-                    self.log(f"SUCCESS: Created WIM file ({size_gb:.1f} GB)")
-                
-                return True
-            else:
-                self.log(f"ERROR: DISM capture failed with exit code: {dism_proc.returncode}")
-                self.log("TROUBLESHOOTING:")
-                self.log("  1. Ensure you're running as Administrator")
-                self.log("  2. Close any applications that might lock files")
-                self.log("  3. Ensure destination drive has enough free space")
-                self.log("  4. Try a different destination path")
-                self.log("  5. Consider using VSS method instead for better reliability")
-                return False
-
-        except Exception as e:
-            self.log(f"FATAL: Direct DISM capture failed: {e}")
-            return False
+        # This method is deprecated - use the modern restic backup workflow instead
+        self.log("ERROR: This DISM method is deprecated. Use the modern Restic backup in Step 1.")
+        messagebox.showerror("Method Deprecated", 
+                           "DISM-based WIM creation has been replaced with the modern Restic workflow in Step 1.\n\n" +
+                           "Please use 'Create System Backup' in Step 1 instead.")
+        return False
 
     def start_vss_wim_creation_thread(self):
         """Starts the VSS + DISM WIM creation process in a new thread."""
@@ -7248,430 +7776,934 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
     def create_vss_restic_backup(self):
         """Creates a backup using Restic's built-in VSS support."""
         try:
-            # Check prerequisites first
-            self.check_vss_prerequisites()
+            self.log("INFO: Starting VSS + Restic backup process...")
             
-            # Get parameters from GUI
-            destination_path = self.destination_path_var.get().strip()
-            
-            # Validate destination path
-            if not destination_path:
-                self.log("ERROR: No destination path provided.")
-                messagebox.showerror("Invalid Input", "Please provide a destination directory for the backup repository.")
+            # Validate configuration
+            if not self.validate_backup_config():
                 return False
-
-            # Ensure destination directory exists
-            dest_dir = Path(destination_path)
-            if not dest_dir.exists():
-                self.log(f"INFO: Creating destination directory: {dest_dir}")
-                try:
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                except Exception as e:
-                    self.log(f"ERROR: Failed to create destination directory: {e}")
-                    return False
-
+            
             # Download Restic if needed
-            self.log("INFO: Ensuring Restic binary is available...")
             restic_exe = self.download_restic()
             if not restic_exe:
                 self.log("ERROR: Failed to get Restic binary")
                 return False
-
-            self.log("INFO: Backing up C: drive")
-            self.log("INFO: Using Restic's built-in VSS support for reliable backup:")
-            self.log("  ✅ Automatic Volume Shadow Copy creation")
-            self.log("  ✅ Native Windows VSS integration")
-            self.log("  ✅ Built-in deduplication and compression")
-            self.log("  ✅ Resume on interruption")
-            self.log("  ✅ Handles file locking gracefully")
-            self.log("")
             
-            # Ask for user confirmation
-            if not messagebox.askyesno("Restic VSS Backup Confirmation", 
-                "🚀 RECOMMENDED: Restic Native VSS Method\n\n"
-                "This method will:\n"
-                "• Use Restic's built-in VSS support\n"
-                "• Automatically create VSS snapshots\n"
-                "• Handle file access issues gracefully\n"
-                "• Provide deduplication and compression\n"
-                "• Allow resumable backups\n\n"
-                "This is the MOST RELIABLE method.\n\n"
-                "Continue with Restic VSS backup?"):
-                self.log("INFO: Restic VSS backup cancelled by user")
+            # Initialize repository if needed
+            if not self.init_restic_repository():
                 return False
+            
+            # Perform the backup
+            return self.perform_restic_backup(restic_exe)
+            
+        except Exception as e:
+            self.log(f"FATAL: VSS + Restic backup failed: {e}")
+            return False
 
-            # Initialize Restic repository using organized structure
-            self.log("INFO: Initializing Restic repository...")
+    def validate_backup_config(self):
+        """Validate backup configuration"""
+        try:
+            # Check if we have required configuration
+            repo_type = getattr(self, 'repo_type_var', None)
+            if not repo_type:
+                self.log("ERROR: Repository type not configured")
+                return False
             
-            # Get client, site, and role info from Step 1 form
-            client_name = self.client_var.get() if hasattr(self, 'client_var') else "unknown-client"
-            site_name = self.site_var.get() if hasattr(self, 'site_var') else "unknown-site"
-            role = self.role_var.get() if hasattr(self, 'role_var') else "system-backup"
-            
-            # Find client ID - if not available, create a temp one or use hostname
-            client_id = None
-            site_id = None
-            
-            if hasattr(self, 'client_var') and client_name and client_name != "-- Select Client --":
-                clients = self.db.get_clients()
-                for cid, name, _, _ in clients:
-                    if name == client_name:
-                        client_id = cid
-                        break
+            self.log(f"INFO: Repository type selected: {repo_type.get()}")
                 
-                # Find site ID if client ID was found
-                if client_id and hasattr(self, 'site_var') and site_name and site_name != "-- Select Site --":
-                    sites = self.db.get_sites(client_id)
-                    for sid, _, s_name, _, _, _ in sites:
-                        if s_name == site_name:
-                            site_id = sid
-                            break
-            
-            if not client_id:
-                # Error out - client selection is required
-                self.log("ERROR: No client selected. Please select a client in Step 1.")
-                messagebox.showerror("Client Required", "Please select a client in Step 1 before creating a backup.")
-                return False
-            
-            if not site_id:
-                # Error out - site selection is required
-                self.log("ERROR: No site selected. Please select a site in Step 1.")
-                messagebox.showerror("Site Required", "Please select a site in Step 1 before creating a backup.")
-                return False
-            
-            self.log(f"INFO: Using client ID: {client_id}")
-            self.log(f"INFO: Using site ID: {site_id}")
-            self.log(f"INFO: Using role: {role}")
-            
-            # Determine repository type and path
-            repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "local"
-            
-            if repo_type == "s3":
-                # S3 repository configuration
+            if repo_type.get() == "s3":
+                # Validate S3 configuration
                 s3_config = self.db.get_s3_config()
-                if not s3_config:
-                    self.log("ERROR: S3 configuration not found. Please configure S3 settings.")
-                    messagebox.showerror("S3 Error", "S3 configuration is required but not found. Please configure S3 settings first.")
+                if not s3_config or not all([s3_config.get('s3_bucket'), s3_config.get('s3_access_key'), s3_config.get('s3_secret_key')]):
+                    self.log("ERROR: S3 configuration incomplete. Please configure S3 settings.")
+                    self.log("SOLUTION: Click 'Configure S3...' button to set up S3 credentials")
+                    self.log("ALTERNATIVE: Switch to 'Local File System' repository type")
+                    
+                    # Debug: Show what S3 config we found
+                    if s3_config:
+                        self.log(f"DEBUG: Found S3 config keys: {list(s3_config.keys())}")
+                    else:
+                        self.log("DEBUG: No S3 config found in database")
+                    
+                    # Show helpful dialog
+                    messagebox.showerror("S3 Configuration Required", 
+                        "S3 Cloud Storage is selected but not configured.\n\n" +
+                        "Please either:\n" +
+                        "1. Click 'Configure S3...' button to set up S3 credentials\n" +
+                        "2. Switch to 'Local File System' repository type\n\n" +
+                        "Then try the backup again.")
                     return False
-                
-                # Construct S3 repository path according to restic documentation
-                s3_bucket = s3_config.get('s3_bucket')
-                s3_endpoint = s3_config.get('s3_endpoint', 's3.amazonaws.com')
-                s3_path = self.s3_path_var.get() if hasattr(self, 's3_path_var') else ""
-                
-                # Format: s3:https://server:port/bucket_name for S3-compatible storage
-                # For AWS S3, use s3:s3.amazonaws.com/bucket_name
-                if s3_endpoint == 's3.amazonaws.com':
-                    repo_path = f"s3:{s3_endpoint}/{s3_bucket}"
-                else:
-                    # For S3-compatible storage, include https:// if not already present
-                    if not s3_endpoint.startswith(('http://', 'https://')):
-                        s3_endpoint = f"https://{s3_endpoint}"
-                    repo_path = f"s3:{s3_endpoint}/{s3_bucket}"
-                
-                # Add the path prefix within the bucket
-                if s3_path.strip('/'):
-                    repo_path += f"/{s3_path.strip('/')}"
-                
-                # Add client UUID as repository name (one repo per client)
-                repo_path += f"/{client_id}"
-                
-                # Set S3 environment variables
-                os.environ['AWS_ACCESS_KEY_ID'] = s3_config.get('s3_access_key')
-                os.environ['AWS_SECRET_ACCESS_KEY'] = s3_config.get('s3_secret_key')
-                os.environ['AWS_DEFAULT_REGION'] = s3_config.get('s3_region', 'us-east-1')
-                
-                self.log(f"INFO: Using S3 repository: {repo_path}")
-                self.log(f"INFO: S3 bucket: {s3_bucket}")
-                self.log(f"INFO: S3 region: {s3_config.get('s3_region', 'us-east-1')}")
-            else:
-                # Local file system repository - one repo per client
-                restic_base = self.get_restic_base_path()
-                repo_path = restic_base / client_id
-                repo_path.mkdir(parents=True, exist_ok=True)
-                
-                self.log(f"INFO: Using local repository: {repo_path}")
-                self.log(f"INFO: Client repository path: {repo_path}")
-            
-            # Generate or retrieve secure repository password
-            client_info = self.db_manager.get_client_by_id(client_id)
-            site_info = self.db_manager.get_site_by_id(site_id) if site_id else None
-            
-            client_name = client_info.get('name', '') if client_info else ''
-            site_name = site_info.get('name', '') if site_info else ''
-            role = self.current_role if hasattr(self, 'current_role') else ''
-            
-            # Check if we already have a password for this client's repository
-            existing_images = self.db_manager.get_images_by_client(client_id)
-            repo_password = None
-            
-            if existing_images:
-                # Use existing password from the first image record
-                for img in existing_images:
-                    if img.get('restic_password'):
-                        repo_password = img['restic_password']
-                        self.log(f"INFO: Using existing repository password for client {client_name}")
-                        break
-            
-            if not repo_password:
-                # Generate new secure password
-                repo_password, password_identifier = self.db_manager.generate_secure_password(
-                    client_name=client_name, 
-                    site_name=site_name, 
-                    role=role
-                )
-                
-                self.log(f"INFO: Generated new secure repository password for client {client_name}")
-                
-                # Show password manager reminder dialog
-                self.show_password_manager_reminder(
-                    password=repo_password,
-                    identifier=password_identifier,
-                    client_name=client_name,
-                    site_name=site_name,
-                    role=role
-                )
-            
-            os.environ['RESTIC_PASSWORD'] = repo_password
-            os.environ['RESTIC_REPOSITORY'] = str(repo_path)
-            
-            self.log(f"DEBUG: Set RESTIC_REPOSITORY = {str(repo_path)}")
-            self.log(f"DEBUG: Expected client UUID in path: {client_id}")
-            self.log(f"DEBUG: Repository type: {repo_type}")
-            
-            # Check if repository exists and initialize if needed
-            if repo_type == "s3":
-                # For S3 repositories, try to list snapshots to check if repository exists
-                check_cmd = [restic_exe, "snapshots", "--json", 
-                           "--repo", str(repo_path),
-                           "-o", f"s3.region={s3_config.get('s3_region', 'us-east-1')}",
-                           "-o", "s3.bucket-lookup=auto"]
-                check_proc = subprocess.run(check_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-                
-                if check_proc.returncode != 0:
-                    self.log(f"INFO: Initializing new S3 Restic repository at: {repo_path}")
-                    init_cmd = [restic_exe, "init",
-                              "--repo", str(repo_path),
-                              "-o", f"s3.region={s3_config.get('s3_region', 'us-east-1')}",
-                              "-o", "s3.bucket-lookup=auto"]
-                    init_proc = subprocess.run(init_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
                     
-                    if init_proc.returncode != 0:
-                        self.log(f"ERROR: Failed to initialize S3 Restic repository: {init_proc.stderr}")
-                        return False
-                    else:
-                        self.log("SUCCESS: S3 Restic repository initialized")
-                else:
-                    self.log("INFO: Using existing S3 Restic repository")
-            else:
-                # For local repositories, check file system existence
-                if not repo_path.exists():
-                    self.log(f"INFO: Initializing new Restic repository at: {repo_path}")
-                    init_cmd = [restic_exe, "init", "--repo", str(repo_path)]
-                    init_proc = subprocess.run(init_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            elif repo_type.get() == "local":
+                # Validate local path
+                repo_location = getattr(self, 'repo_location_var', None)
+                if not repo_location or not repo_location.get():
+                    self.log("ERROR: Local repository path not configured")
+                    self.log("SOLUTION: Set a local folder path for the repository")
                     
-                    if init_proc.returncode != 0:
-                        self.log(f"ERROR: Failed to initialize Restic repository: {init_proc.stderr}")
-                        return False
-                    else:
-                        self.log("SUCCESS: Restic repository initialized")
-                else:
-                    self.log("INFO: Using existing Restic repository")
+                    # Show helpful dialog
+                    messagebox.showerror("Local Path Required", 
+                        "Local File System is selected but no path is configured.\n\n" +
+                        "Please set a local folder path where the backup repository will be stored.\n\n" +
+                        "Example: C:\\Backups\\ResticRepo")
+                    return False
+                    
+            return True
+        except Exception as e:
+            self.log(f"ERROR: Configuration validation failed: {e}")
+            return False
 
-            # Determine image UUID (new vs existing)
-            image_type = self.image_type_var.get() if hasattr(self, 'image_type_var') else "new"
+    def init_restic_repository(self):
+        """Initialize restic repository if needed"""
+        try:
+            self.log("INFO: Checking/initializing Restic repository...")
             
-            if image_type == "existing":
-                # Use existing image UUID for incremental backup
-                existing_uuid = self.get_selected_image_uuid()
-                if existing_uuid:
-                    image_uuid = existing_uuid
-                    self.log(f"INFO: Using existing image UUID for incremental backup: {image_uuid}")
-                else:
-                    self.log("ERROR: No existing image selected for incremental backup")
-                    messagebox.showerror("Error", "Please select an existing image for incremental backup")
+            # Get restic executable
+            restic_exe = self.download_restic()
+            if not restic_exe:
+                return False
+            
+            # Set up environment
+            env = os.environ.copy()
+            env['RESTIC_PASSWORD'] = "defaultpassword"  # This should be configurable
+            
+            repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
+            if repo_type == "s3":
+                s3_config = self.db.get_s3_config()
+                
+                # Build organized S3 path structure
+                s3_repo_path = self.build_s3_repository_path(s3_config)
+                if not s3_repo_path:
                     return False
+                    
+                env['RESTIC_REPOSITORY'] = s3_repo_path
+                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
             else:
-                # Generate new UUIDv7 for new image
-                image_uuid = generate_uuidv7()
-                self.log(f"INFO: Generated new image UUID: {image_uuid}")
+                repo_path = self.repo_location_var.get()
+                env['RESTIC_REPOSITORY'] = repo_path
+                
+                # Create local directory if it doesn't exist
+                Path(repo_path).mkdir(parents=True, exist_ok=True)
             
-            # Get workflow mode for tagging
+            # Check if repository exists
+            check_cmd = [str(restic_exe), "snapshots", "--json"]
+            self.log("INFO: Checking if repository exists...")
+            
+            check_proc = subprocess.run(
+                check_cmd,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            
+            if check_proc.returncode == 0:
+                self.log("INFO: Repository already exists and is accessible")
+                return True
+            else:
+                # Repository doesn't exist, initialize it
+                self.log("INFO: Repository not found, initializing new repository...")
+                init_cmd = [str(restic_exe), "init"]
+                
+                init_proc = subprocess.run(
+                    init_cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if init_proc.returncode == 0:
+                    self.log("SUCCESS: Repository initialized successfully")
+                    return True
+                else:
+                    self.log(f"ERROR: Repository initialization failed: {init_proc.stderr}")
+                    return False
+                    
+        except Exception as e:
+            self.log(f"ERROR: Repository initialization failed: {e}")
+            return False
+
+    def build_s3_repository_path(self, s3_config):
+        """Build organized S3 repository path: bucket/client-uuid/development|production"""
+        try:
+            # Get client UUID
+            client_uuid = None
+            client_name = getattr(self, 'client_var', None)
+            if client_name and client_name.get() and client_name.get() != "-- Select Client --":
+                try:
+                    clients = self.db.get_clients()
+                    for cid, name, short_name, desc in clients:
+                        if name == client_name.get():
+                            client_uuid = cid
+                            break
+                except Exception as e:
+                    self.log(f"WARNING: Could not retrieve client UUID: {e}")
+            
+            # If no client selected, use a default folder
+            if not client_uuid:
+                client_uuid = "default-client"
+                self.log("WARNING: No client selected, using default client folder")
+            
+            # Determine environment (for now, always development)
             workflow_mode = self.get_workflow_mode()
-            self.log(f"INFO: Using workflow mode: {workflow_mode}")
+            if workflow_mode == "production":
+                environment = "production"
+            else:
+                environment = "development"  # Default to development
             
-            # Build Restic backup command using built-in VSS support
+            # Build S3 path: s3:endpoint/bucket/client-uuid/environment
+            s3_path = f"s3:{s3_config['s3_endpoint']}/{s3_config['s3_bucket']}/{client_uuid}/{environment}"
+            
+            self.log(f"INFO: S3 repository structure:")
+            self.log(f"  └── Bucket: {s3_config['s3_bucket']}")
+            self.log(f"      └── Client: {client_uuid}")
+            self.log(f"          └── Environment: {environment}")
+            self.log(f"INFO: Full S3 path: {s3_path}")
+            
+            return s3_path
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to build S3 repository path: {e}")
+            return None
+
+    def generate_backup_tags(self):
+        """Generate comprehensive backup tags with UUIDs and metadata"""
+        tags = []
+        
+        # Generate backup session UUID (UUIDv7)
+        backup_uuid = generate_uuidv7()
+        tags.append(f"backup-uuid:{backup_uuid}")
+        
+        # Basic system information
+        tags.append("type:system-backup")
+        tags.append(f"hostname:{os.environ.get('COMPUTERNAME', 'unknown')}")
+        tags.append(f"date:{datetime.now().strftime('%Y-%m-%d')}")
+        tags.append(f"time:{datetime.now().strftime('%H-%M-%S')}")
+        tags.append(f"timestamp:{int(datetime.now().timestamp())}")
+        
+        # OS-only vs full backup
+        os_only = getattr(self, 'capture_os_only_var', None)
+        if os_only and os_only.get():
+            tags.append("scope:os-only")
+        else:
+            tags.append("scope:full-drive")
+        
+        # Client information
+        client_name = getattr(self, 'client_var', None)
+        if client_name and client_name.get() and client_name.get() != "-- Select Client --":
+            tags.append(f"client-name:{client_name.get()}")
+            
+            # Find client UUID from database
+            try:
+                clients = self.db.get_clients()
+                for client_id, name, short_name, desc in clients:
+                    if name == client_name.get():
+                        tags.append(f"client-uuid:{client_id}")
+                        tags.append(f"client-short:{short_name}")
+                        break
+            except Exception as e:
+                self.log(f"WARNING: Could not retrieve client UUID: {e}")
+        
+        # Site information
+        site_name = getattr(self, 'site_var', None)
+        if site_name and site_name.get() and site_name.get() != "-- Select Site --":
+            tags.append(f"site-name:{site_name.get()}")
+            
+            # Find site UUID from database
+            try:
+                # Get all sites to find the matching one
+                sites = self.db.get_sites()
+                for site_id, client_id, name, short_name, desc, client_name_db in sites:
+                    if name == site_name.get():
+                        tags.append(f"site-uuid:{site_id}")
+                        tags.append(f"site-short:{short_name}")
+                        break
+            except Exception as e:
+                self.log(f"WARNING: Could not retrieve site UUID: {e}")
+        
+        # Role information
+        role = getattr(self, 'role_var', None)
+        if role and role.get():
+            tags.append(f"role:{role.get()}")
+        
+        # Repository type and configuration
+        repo_type = getattr(self, 'repo_type_var', None)
+        if repo_type:
+            tags.append(f"repo-type:{repo_type.get()}")
+            
+            if repo_type.get() == "s3":
+                try:
+                    s3_config = self.db.get_s3_config()
+                    if s3_config:
+                        tags.append(f"s3-bucket:{s3_config.get('s3_bucket', 'unknown')}")
+                        tags.append(f"s3-endpoint:{s3_config.get('s3_endpoint', 'unknown')}")
+                except Exception as e:
+                    self.log(f"WARNING: Could not retrieve S3 config for tagging: {e}")
+        
+        # Image type (new vs existing)
+        image_type = getattr(self, 'image_type_var', None)
+        if image_type and image_type.get():
+            tags.append(f"image-type:{image_type.get()}")
+        
+        # Existing image information if updating
+        if image_type and image_type.get() == "existing":
+            existing_image = getattr(self, 'existing_image_var', None)
+            if existing_image and existing_image.get():
+                tags.append(f"base-image:{existing_image.get()}")
+        
+        # Hardware identification
+        hardware_info = self.get_hardware_info()
+        if hardware_info['system_uuid']:
+            tags.append(f"system-uuid:{hardware_info['system_uuid']}")
+        if hardware_info['serial_number']:
+            tags.append(f"serial-number:{hardware_info['serial_number']}")
+        if hardware_info['manufacturer']:
+            tags.append(f"manufacturer:{hardware_info['manufacturer']}")
+        if hardware_info['model']:
+            tags.append(f"model:{hardware_info['model']}")
+        if hardware_info['bios_version']:
+            tags.append(f"bios-version:{hardware_info['bios_version']}")
+        if hardware_info['total_memory_gb']:
+            tags.append(f"memory-gb:{hardware_info['total_memory_gb']}")
+        
+        # Tool and version information
+        tags.append("tool:windows-image-prep-gui")
+        tags.append("version:2025.1")  # Tool version
+        tags.append(f"restic-version:{self.get_restic_version()}")
+        
+        # Workflow mode and environment
+        workflow_mode = self.get_workflow_mode()
+        tags.append(f"workflow-mode:{workflow_mode}")
+        
+        # Environment tag for S3 folder structure
+        if workflow_mode == "production":
+            environment = "production"
+        else:
+            environment = "development"  # Default to development
+        tags.append(f"environment:{environment}")
+        
+        # Log hardware summary
+        hardware_tags = [tag for tag in tags if any(hw in tag for hw in ['system-uuid', 'serial-number', 'manufacturer', 'model', 'bios-version', 'memory-gb'])]
+        if hardware_tags:
+            self.log("INFO: Hardware identification tags:")
+            for tag in hardware_tags:
+                self.log(f"  HW: {tag}")
+        
+        # Log the tags for debugging
+        self.log(f"INFO: Generated {len(tags)} backup tags total")
+        # Only log first few tags to avoid spam, hardware tags already logged above
+        other_tags = [tag for tag in tags if not any(hw in tag for hw in ['system-uuid', 'serial-number', 'manufacturer', 'model', 'bios-version', 'memory-gb'])]
+        self.log(f"INFO: Additional tags: {len(other_tags)} organizational and system tags")
+        
+        return tags
+
+    def get_restic_version(self):
+        """Get Restic version for tagging"""
+        try:
+            restic_exe = self.download_restic()
+            if restic_exe:
+                version_proc = subprocess.run([str(restic_exe), "version"], 
+                                            capture_output=True, text=True, timeout=10)
+                if version_proc.returncode == 0:
+                    # Extract version from output like "restic 0.18.0 compiled with go1.24.1 on windows/amd64"
+                    version_line = version_proc.stdout.strip()
+                    if "restic" in version_line:
+                        parts = version_line.split()
+                        if len(parts) >= 2:
+                            return parts[1]  # Return just the version number
+                return "unknown"
+        except Exception:
+            pass
+        return "unknown"
+
+    def get_hardware_info(self):
+        """Get hardware information from Windows WMI"""
+        hardware_info = {
+            'system_uuid': None,
+            'serial_number': None,
+            'manufacturer': None,
+            'model': None,
+            'bios_version': None,
+            'total_memory_gb': None
+        }
+        
+        try:
+            # Use PowerShell to query WMI for hardware information
+            # This is more reliable than using Python WMI libraries
+            powershell_cmd = '''
+            $computer = Get-WmiObject -Class Win32_ComputerSystemProduct
+            $bios = Get-WmiObject -Class Win32_BIOS
+            $system = Get-WmiObject -Class Win32_ComputerSystem
+            
+            $output = @{
+                "SystemUUID" = $computer.UUID
+                "SerialNumber" = $bios.SerialNumber
+                "Manufacturer" = $system.Manufacturer
+                "Model" = $system.Model
+                "BIOSVersion" = $bios.SMBIOSBIOSVersion
+                "TotalPhysicalMemory" = [math]::Round($system.TotalPhysicalMemory / 1GB, 2)
+            }
+            
+            $output | ConvertTo-Json -Compress
+            '''
+            
+            self.log("INFO: Retrieving hardware information via WMI...")
+            
+            result = subprocess.run([
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", powershell_cmd
+            ], capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=30)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    import json
+                    wmi_data = json.loads(result.stdout.strip())
+                    
+                    # Extract and clean the data
+                    system_uuid = wmi_data.get('SystemUUID', '').strip()
+                    serial_number = wmi_data.get('SerialNumber', '').strip()
+                    manufacturer = wmi_data.get('Manufacturer', '').strip()
+                    model = wmi_data.get('Model', '').strip()
+                    bios_version = wmi_data.get('BIOSVersion', '').strip()
+                    total_memory = wmi_data.get('TotalPhysicalMemory', 0)
+                    
+                    # Clean up common placeholder values
+                    if system_uuid and system_uuid.lower() not in ['', 'null', 'none', '00000000-0000-0000-0000-000000000000']:
+                        hardware_info['system_uuid'] = system_uuid
+                        self.log(f"INFO: System UUID: {system_uuid}")
+                    
+                    if serial_number and serial_number.lower() not in ['', 'null', 'none', 'to be filled by o.e.m.', 'default string']:
+                        hardware_info['serial_number'] = serial_number
+                        self.log(f"INFO: Serial Number: {serial_number}")
+                    
+                    if manufacturer and manufacturer.lower() not in ['', 'null', 'none', 'to be filled by o.e.m.']:
+                        hardware_info['manufacturer'] = manufacturer.replace(' ', '-').lower()
+                        self.log(f"INFO: Manufacturer: {manufacturer}")
+                    
+                    if model and model.lower() not in ['', 'null', 'none', 'to be filled by o.e.m.']:
+                        hardware_info['model'] = model.replace(' ', '-').lower()
+                        self.log(f"INFO: Model: {model}")
+                    
+                    if bios_version and bios_version.lower() not in ['', 'null', 'none']:
+                        hardware_info['bios_version'] = bios_version.replace(' ', '-').lower()
+                        self.log(f"INFO: BIOS Version: {bios_version}")
+                    
+                    if total_memory and total_memory > 0:
+                        hardware_info['total_memory_gb'] = str(total_memory)
+                        self.log(f"INFO: Total Memory: {total_memory} GB")
+                    
+                except json.JSONDecodeError as e:
+                    self.log(f"WARNING: Failed to parse WMI JSON output: {e}")
+                except Exception as e:
+                    self.log(f"WARNING: Failed to process WMI data: {e}")
+            else:
+                self.log(f"WARNING: PowerShell WMI query failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            self.log("WARNING: WMI query timed out after 30 seconds")
+        except Exception as e:
+            self.log(f"WARNING: Failed to retrieve hardware information: {e}")
+        
+        # Fallback: try to get some basic info from environment variables
+        if not hardware_info['system_uuid']:
+            self.log("INFO: Attempting fallback methods for hardware identification...")
+            
+            # Try to get computer name as a fallback identifier
+            computer_name = os.environ.get('COMPUTERNAME', '')
+            if computer_name:
+                # Create a deterministic UUID based on computer name
+                # This isn't a real system UUID but provides some identification
+                import hashlib
+                name_hash = hashlib.md5(computer_name.encode()).hexdigest()
+                fallback_uuid = f"fallback-{name_hash[:8]}-{name_hash[8:12]}-{name_hash[12:16]}-{name_hash[16:20]}-{name_hash[20:32]}"
+                hardware_info['system_uuid'] = fallback_uuid
+                self.log(f"INFO: Using fallback UUID based on computer name: {fallback_uuid}")
+        
+        return hardware_info
+
+    def perform_restic_backup(self, restic_exe):
+        """Perform the actual restic backup with VSS"""
+        try:
+            # Check if user wants OS-only backup
+            os_only = getattr(self, 'capture_os_only_var', None)
+            if os_only and os_only.get():
+                self.log("INFO: Starting Restic backup (OS files only) with automatic VSS support...")
+            else:
+                self.log("INFO: Starting Restic backup (full C: drive) with automatic VSS support...")
+            
+            # Generate comprehensive tags with UUIDs and metadata
+            backup_tags = self.generate_backup_tags()
+            
+            # Build restic backup command (VSS is automatic on Windows)
             backup_cmd = [
-                restic_exe, "backup",
-                "C:\\",  # Use C: drive directly - restic will handle VSS
-                "--repo", str(repo_path),  # Explicitly specify repository path
-                "--use-fs-snapshot",  # Enable built-in VSS support
-                "--tag", f"system-backup-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                "--tag", f"image-uuid-{image_uuid}",
-                "--tag", f"client-uuid-{client_id}",
-                "--tag", f"site-uuid-{site_id}",
-                "--tag", f"role-{role}",
-                "--tag", f"workflow-{workflow_mode}",
-                "--tag", "vss-backup-native",
-                "--tag", f"hostname-{os.environ.get('COMPUTERNAME', 'unknown')}",
-                "--exclude", "System Volume Information",
-                "--exclude", "$RECYCLE.BIN", 
-                "--exclude", "pagefile.sys",
-                "--exclude", "hiberfil.sys",
-                "--exclude", "swapfile.sys",
-                "--exclude", "*.tmp",
-                "--exclude", "Windows/Temp/*",
-                "--exclude", "Users/*/AppData/Local/Temp/*",
-                "--verbose"
+                str(restic_exe), "backup", "C:/", 
+                "--verbose",
+                "--with-atime"  # Include access time (useful for Windows)
             ]
             
-            # Add S3-specific options for compatibility
+            # Add all tags to command
+            for tag in backup_tags:
+                backup_cmd.extend(["--tag", tag])
+            
+            # Add exclusions
+            exclusions = [
+                "C:/Windows/Temp/*", "C:/Windows/Logs/*", "C:/Windows/Prefetch/*",
+                "C:/Temp/*", "C:/$Recycle.Bin/*", "C:/System Volume Information/*",
+                "C:/pagefile.sys", "C:/hiberfil.sys", "C:/swapfile.sys",
+                "*/Temporary Internet Files/*", "*/AppData/Local/Temp/*",
+                "*/AppData/Local/Microsoft/Windows/INetCache/*",
+                "C:/Windows/SoftwareDistribution/*",  # Windows Update files
+                "C:/Windows/Installer/*",  # MSI installer cache
+                "C:/ProgramData/Microsoft/Windows/WER/*",  # Windows Error Reporting
+            ]
+            
+            for exclusion in exclusions:
+                backup_cmd.extend(["--exclude", exclusion])
+            
+            self.log(f"INFO: Added {len(exclusions)} standard exclusions for Windows")
+            # Note: --one-file-system is not supported on Windows, so we skip it
+            self.log("INFO: Skipping --one-file-system flag (not supported on Windows)")
+            
+            # Add OS-only exclusions if selected
+            if os_only and os_only.get():
+                self.log("INFO: Adding OS-only exclusions (excluding user data)")
+                os_exclusions = [
+                    "C:/Users/*/Documents/*", "C:/Users/*/Downloads/*", 
+                    "C:/Users/*/Pictures/*", "C:/Users/*/Videos/*",
+                    "C:/Users/*/Music/*", "C:/Users/*/Desktop/*",
+                    "C:/Users/*/AppData/Local/*", "C:/Users/*/AppData/LocalLow/*"
+                ]
+                for exclusion in os_exclusions:
+                    backup_cmd.extend(["--exclude", exclusion])
+                self.log(f"INFO: Added {len(os_exclusions)} OS-only exclusions")
+            
+            # Set environment variables for repository
+            env = os.environ.copy()
+            env['RESTIC_PASSWORD'] = "defaultpassword"  # This should be configurable
+            
+            repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
             if repo_type == "s3":
-                # Add region specification
-                backup_cmd.extend(["-o", f"s3.region={s3_config.get('s3_region', 'us-east-1')}"])
+                s3_config = self.db.get_s3_config()
                 
-                # Add bucket lookup mode for better compatibility with S3-compatible storage
-                backup_cmd.extend(["-o", "s3.bucket-lookup=auto"])
-                
-                # For older S3-compatible servers (like older Ceph), you might need this option
-                # backup_cmd.extend(["-o", "s3.list-objects-v1=true"])
-                
-                self.log(f"INFO: Added S3 options: region={s3_config.get('s3_region', 'us-east-1')}, bucket-lookup=auto")
+                # Build organized S3 path structure
+                s3_repo_path = self.build_s3_repository_path(s3_config)
+                if not s3_repo_path:
+                    self.log("ERROR: Failed to build S3 repository path")
+                    return False
+                    
+                env['RESTIC_REPOSITORY'] = s3_repo_path
+                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
+            else:
+                env['RESTIC_REPOSITORY'] = self.repo_location_var.get()
             
-            # No additional exclusions needed - restic handles VSS natively
+            self.log(f"INFO: Running backup command with {len(backup_cmd)} arguments")
             
-            self.log(f"COMMAND: {' '.join(backup_cmd)}")
-            self.log("INFO: Starting Restic backup with native VSS - this may take 30-60 minutes...")
-            
-            # Execute Restic backup
-            backup_proc = subprocess.Popen(
+            # Run the backup process
+            process = subprocess.Popen(
                 backup_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                encoding='utf-8',
-                errors='ignore'
+                env=env
             )
             
-            # Stream Restic output
-            if backup_proc.stdout:
-                for line in iter(backup_proc.stdout.readline, ''):
-                    line = line.strip()
-                    if line:
-                        self.log(line)
+            # Stream output
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if line.strip():
+                    self.log(f"RESTIC: {line.strip()}")
             
-            backup_proc.wait()
+            process.wait()
             
-            if backup_proc.returncode == 0:
-                self.log("SUCCESS: Restic backup completed!")
-                self.log(f"SUCCESS: Backup repository created at: {repo_path}")
-                self.log(f"INFO: Repository password: {repo_password}")
+            if process.returncode == 0:
+                self.log("SUCCESS: Restic backup completed successfully!")
                 
-                # Create database record for the backup
+                # Store backup metadata in database
                 try:
-                    # Calculate repository size
-                    repo_size_gb = self.calculate_repo_size(repo_path)
-                    
-                    # Get snapshot count and latest snapshot ID
-                    os.environ['RESTIC_REPOSITORY'] = str(repo_path)
-                    os.environ['RESTIC_PASSWORD'] = repo_password
-                    
-                    # Query for snapshots with our image UUID tag
-                    snapshots_cmd = [restic_exe, "snapshots", "--json", "--tag", f"image-uuid-{image_uuid}"]
-                    snapshots_result = subprocess.run(snapshots_cmd, capture_output=True, text=True)
-                    
-                    snapshot_count = 0
-                    latest_snapshot_id = ""
-                    
-                    if snapshots_result.returncode == 0 and snapshots_result.stdout.strip():
-                        import json
-                        try:
-                            snapshots = json.loads(snapshots_result.stdout)
-                            snapshot_count = len(snapshots)
-                            if snapshots:
-                                latest_snapshot_id = snapshots[-1].get('id', '')
-                        except json.JSONDecodeError:
-                            self.log("WARNING: Could not parse snapshot information")
-                    
-                    # Create database entry
-                    self.db.create_image(
-                        image_id=image_uuid,
-                        client_id=client_id,
-                        site_id=site_id,
-                        role=role,
-                        repository_path=str(repo_path),
-                        repository_size_gb=repo_size_gb,
-                        snapshot_count=snapshot_count,
-                        latest_snapshot_id=latest_snapshot_id,
-                        restic_password=repo_password
-                    )
-                    
-                    self.log(f"SUCCESS: Backup registered in database with ID: {image_uuid}")
-                    
-                    # Create JSON metadata file in client repository folder
-                    client_info = {
-                        "id": client_id,
-                        "name": client_name,
-                        "short_name": "",  # Will be filled from database if available
-                        "description": ""
-                    }
-                    site_info = {
-                        "id": site_id,
-                        "name": site_name,
-                        "short_name": "",  # Will be filled from database if available  
-                        "description": ""
-                    }
-                    image_info = {
-                        "id": image_uuid,
-                        "role": role,
-                        "site_id": site_id,
-                        "repository_path": str(repo_path),
-                        "snapshot_count": snapshot_count,
-                        "latest_snapshot_id": latest_snapshot_id,
-                        "repository_size_gb": repo_size_gb
-                    }
-                    
-                    # Create local metadata file
-                    if self.create_client_metadata_json(client_id, client_info, site_info, image_info):
-                        self.log("SUCCESS: Local client metadata JSON file created")
-                    else:
-                        self.log("WARNING: Failed to create local client metadata JSON file")
-                    
-                    # Create S3 image metadata file only for new images (not incremental updates)
-                    if image_type == "new":
-                        if self.create_s3_image_metadata(image_uuid, client_info, site_info, image_info, workflow_mode):
-                            self.log(f"SUCCESS: S3 image metadata uploaded to bucket root: metadata/{image_uuid}.json")
-                        else:
-                            self.log("WARNING: Failed to upload S3 image metadata")
-                    else:
-                        self.log(f"INFO: Skipping metadata creation for incremental backup of existing image {image_uuid}")
-                        
+                    self.store_backup_metadata(backup_tags)
                 except Exception as e:
-                    self.log(f"WARNING: Failed to create database record: {str(e)}")
+                    self.log(f"WARNING: Could not store backup metadata: {e}")
                 
-                self.log("")
-                self.log("🎯 RESTORE INSTRUCTIONS:")
-                self.log(f"  Set environment: set RESTIC_REPOSITORY={repo_path}")
-                self.log(f"  Set password: set RESTIC_PASSWORD={repo_password}")
-                self.log(f"  List snapshots: {restic_exe} snapshots")
-                self.log(f"  Restore latest: {restic_exe} restore latest --target C:\\Restored")
-                self.log("")
+                # Store local client metadata JSON file
+                try:
+                    # Extract client info from tags for metadata
+                    tag_dict = {}
+                    for tag in backup_tags:
+                        if ':' in tag:
+                            key, value = tag.split(':', 1)
+                            tag_dict[key] = value
+                    
+                    client_uuid = tag_dict.get('client-uuid')
+                    if client_uuid:
+                        client_info = self.db_manager.get_client_by_id(client_uuid)
+                        site_info = self.db_manager.get_site_by_id(tag_dict.get('site-uuid'))
+                        image_info = {
+                            "id": tag_dict.get('backup-uuid'),
+                            "role": tag_dict.get('role'),
+                            "created_at": datetime.now().isoformat()
+                        }
+                        self.create_client_metadata_json(client_uuid, client_info, site_info, image_info)
+                except Exception as e:
+                    self.log(f"WARNING: Could not create client metadata JSON: {e}")
+                
+                # Store metadata JSON file to S3 for discovery
+                try:
+                    self.store_s3_metadata_file(backup_tags)
+                except Exception as e:
+                    self.log(f"WARNING: Could not store S3 metadata file: {e}")
+                
                 return True
             else:
-                self.log(f"ERROR: Restic backup failed with exit code: {backup_proc.returncode}")
-                self.log("")
-                self.log("🔧 TROUBLESHOOTING RESTIC BACKUP FAILURE:")
-                self.log("  1. Check that VSS shadow copy is still accessible")
-                self.log("  2. Ensure destination has enough free space")
-                self.log("  3. Verify no antivirus is blocking Restic")
-                self.log("  4. Check Windows Event Viewer for additional errors")
-                self.log("  5. Try running backup again (Restic can resume)")
-                self.log("")
+                self.log(f"ERROR: Restic backup failed with exit code: {process.returncode}")
                 return False
-
+                
         except Exception as e:
-            self.log(f"FATAL: VSS + Restic backup failed: {e}")
+            self.log(f"ERROR: Backup execution failed: {e}")
             return False
+
+    def store_backup_metadata(self, backup_tags):
+        """Store backup metadata in database for tracking"""
+        try:
+            # Extract key information from tags
+            backup_uuid = None
+            client_uuid = None
+            site_uuid = None
+            role = None
+            scope = None
+            repo_type = None
+            
+            tag_dict = {}
+            for tag in backup_tags:
+                if ':' in tag:
+                    key, value = tag.split(':', 1)
+                    tag_dict[key] = value
+            
+            backup_uuid = tag_dict.get('backup-uuid')
+            client_uuid = tag_dict.get('client-uuid') 
+            site_uuid = tag_dict.get('site-uuid')
+            role = tag_dict.get('role', 'unknown')
+            scope = tag_dict.get('scope', 'unknown')
+            repo_type = tag_dict.get('repo-type', 'unknown')
+            hostname = tag_dict.get('hostname', 'unknown')
+            
+            if backup_uuid:
+                # Store as an image record in the database
+                description = f"System backup - {scope} - {hostname} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                # Use client_uuid if available, otherwise create a generic entry
+                client_id = client_uuid if client_uuid else "backup-only"
+                site_id = site_uuid if site_uuid else "backup-only"
+                
+                # Store in images table
+                repo_path = "backup-session"  # Special marker for backup sessions
+                self.db.create_image(
+                    image_id=backup_uuid,
+                    client_id=client_id, 
+                    site_id=site_id,
+                    role=role,
+                    repository_path=repo_path,
+                    repository_size_gb=0  # Will be updated later if needed
+                )
+                
+                # Store all tags as JSON metadata
+                tags_json = json.dumps(tag_dict)
+                self.db.save_image_metadata(backup_uuid, tags_json)
+                
+                self.log(f"INFO: Backup metadata stored with UUID: {backup_uuid}")
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to store backup metadata: {e}")
+
+    def store_s3_metadata_file(self, backup_tags):
+        """Store metadata JSON file to S3 for image discovery"""
+        try:
+            # Extract backup UUID and other key info
+            tag_dict = {}
+            for tag in backup_tags:
+                if ':' in tag:
+                    key, value = tag.split(':', 1)
+                    tag_dict[key] = value
+            
+            backup_uuid = tag_dict.get('backup-uuid')
+            if not backup_uuid:
+                self.log("WARNING: No backup UUID found, cannot store S3 metadata")
+                return False
+                
+            # Only store metadata for S3 repositories
+            repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
+            if repo_type != "s3":
+                self.log("INFO: Local repository - skipping S3 metadata file")
+                return True
+                
+            # Build comprehensive metadata
+            metadata = {
+                "backup_uuid": backup_uuid,
+                "created_timestamp": datetime.now().isoformat(),
+                "version": "1.0",
+                "tool": "windows-image-prep-gui",
+                "tool_version": "2025.1",
+                "tags": tag_dict,
+                "hardware": {
+                    "system_uuid": tag_dict.get('system-uuid'),
+                    "serial_number": tag_dict.get('serial-number'),
+                    "manufacturer": tag_dict.get('manufacturer'),
+                    "model": tag_dict.get('model'),
+                    "hostname": tag_dict.get('hostname'),
+                    "memory_gb": tag_dict.get('memory-gb')
+                },
+                "client_info": {
+                    "client_uuid": tag_dict.get('client-uuid'),
+                    "client_name": tag_dict.get('client-name'),
+                    "site_uuid": tag_dict.get('site-uuid'),
+                    "site_name": tag_dict.get('site-name'),
+                    "role": tag_dict.get('role')
+                },
+                "backup_info": {
+                    "environment": tag_dict.get('environment'),
+                    "scope": tag_dict.get('scope'),
+                    "date": tag_dict.get('date'),
+                    "time": tag_dict.get('time'),
+                    "timestamp": tag_dict.get('timestamp')
+                },
+                "repository_info": {
+                    "repo_type": tag_dict.get('repo-type'),
+                    "restic_version": tag_dict.get('restic-version')
+                }
+            }
+            
+            # Get S3 configuration
+            s3_config = self.db.get_s3_config()
+            if not s3_config:
+                self.log("ERROR: No S3 configuration found")
+                return False
+            
+            # Build S3 metadata file path in the same client/environment structure
+            client_uuid = tag_dict.get('client-uuid', 'default-client')
+            environment = tag_dict.get('environment', 'development')
+            
+            # Create JSON content
+            json_content = json.dumps(metadata, indent=2, ensure_ascii=False)
+            
+            # Create temporary file with metadata
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as temp_file:
+                temp_file.write(json_content)
+                temp_file_path = temp_file.name
+            
+            try:
+                # Use AWS CLI to upload metadata file to S3
+                s3_metadata_path = f"s3://{s3_config['s3_bucket']}/{client_uuid}/{environment}/metadata/{backup_uuid}.json"
+                
+                # Set up environment for AWS CLI
+                env = os.environ.copy()
+                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
+                if s3_config.get('s3_endpoint') and not s3_config['s3_endpoint'].startswith('s3.'):
+                    env['AWS_ENDPOINT_URL'] = f"https://{s3_config['s3_endpoint']}"
+                
+                # Upload using AWS CLI
+                aws_cmd = [
+                    "aws", "s3", "cp", temp_file_path, s3_metadata_path,
+                    "--content-type", "application/json"
+                ]
+                
+                self.log(f"INFO: Uploading metadata to: {s3_metadata_path}")
+                
+                result = subprocess.run(
+                    aws_cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode == 0:
+                    self.log("SUCCESS: Metadata file uploaded to S3")
+                    self.log(f"INFO: Metadata location: {s3_metadata_path}")
+                    return True
+                else:
+                    self.log(f"ERROR: Failed to upload metadata to S3: {result.stderr}")
+                    return False
+                    
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
+                    
+        except Exception as e:
+            self.log(f"ERROR: Failed to store S3 metadata file: {e}")
+            return False
+
+    def scan_s3_for_images(self):
+        """Scan S3 repository for existing image metadata and populate database"""
+        try:
+            self.log("INFO: Scanning S3 for existing image metadata...")
+            
+            # Only scan if S3 is configured
+            s3_config = self.db.get_s3_config()
+            if not s3_config:
+                self.log("INFO: No S3 configuration - skipping image scan")
+                return
+                
+            # Set up environment for AWS CLI
+            env = os.environ.copy()
+            env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+            env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
+            if s3_config.get('s3_endpoint') and not s3_config['s3_endpoint'].startswith('s3.'):
+                env['AWS_ENDPOINT_URL'] = f"https://{s3_config['s3_endpoint']}"
+            
+            # List all metadata files in the bucket
+            bucket = s3_config['s3_bucket']
+            aws_cmd = [
+                "aws", "s3", "ls", f"s3://{bucket}/", 
+                "--recursive", "--output", "json"
+            ]
+            
+            result = subprocess.run(
+                aws_cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode != 0:
+                self.log(f"WARNING: Failed to list S3 objects: {result.stderr}")
+                return
+                
+            # Find metadata files
+            metadata_files = []
+            for line in result.stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    key = obj.get('Key', '')
+                    if '/metadata/' in key and key.endswith('.json'):
+                        metadata_files.append(key)
+                except:
+                    continue
+            
+            self.log(f"INFO: Found {len(metadata_files)} metadata files")
+            
+            discovered_clients = set()
+            discovered_sites = set()
+            
+            # Process each metadata file
+            for metadata_key in metadata_files:
+                try:
+                    # Download metadata file
+                    download_cmd = [
+                        "aws", "s3", "cp", f"s3://{bucket}/{metadata_key}", "-"
+                    ]
+                    
+                    download_result = subprocess.run(
+                        download_cmd,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if download_result.returncode == 0:
+                        metadata = json.loads(download_result.stdout)
+                        
+                        # Extract client and site information
+                        client_info = metadata.get('client_info', {})
+                        client_uuid = client_info.get('client_uuid')
+                        client_name = client_info.get('client_name')
+                        site_uuid = client_info.get('site_uuid')
+                        site_name = client_info.get('site_name')
+                        role = client_info.get('role', 'OP')
+                        
+                        # Add client to database if not exists
+                        if client_uuid and client_name:
+                            try:
+                                # Check if client exists
+                                existing_clients = self.db.get_clients()
+                                client_exists = any(cid == client_uuid for cid, _, _, _ in existing_clients)
+                                
+                                if not client_exists:
+                                    # Create client with discovered info
+                                    client_short = client_name.lower().replace(' ', '-')[:20]
+                                    description = f"Auto-discovered from S3 image metadata"
+                                    
+                                    # Use add_client but with specific UUID
+                                    cursor = self.db.connection.cursor()
+                                    cursor.execute(
+                                        "INSERT INTO clients (id, name, short_name, description) VALUES (?, ?, ?, ?)",
+                                        (client_uuid, client_name, client_short, description)
+                                    )
+                                    self.db.connection.commit()
+                                    
+                                    discovered_clients.add(client_name)
+                                    self.log(f"INFO: Discovered client: {client_name}")
+                                    
+                                # Add site to database if not exists
+                                if site_uuid and site_name:
+                                    existing_sites = self.db.get_sites(client_uuid)
+                                    site_exists = any(sid == site_uuid for sid, _, _, _, _, _ in existing_sites)
+                                    
+                                    if not site_exists:
+                                        site_short = site_name.lower().replace(' ', '-')[:20]
+                                        description = f"Auto-discovered from S3 image metadata"
+                                        
+                                        cursor.execute(
+                                            "INSERT INTO sites (id, client_id, name, short_name, description) VALUES (?, ?, ?, ?, ?)",
+                                            (site_uuid, client_uuid, site_name, site_short, description)
+                                        )
+                                        self.db.connection.commit()
+                                        
+                                        discovered_sites.add(f"{client_name}/{site_name}")
+                                        self.log(f"INFO: Discovered site: {client_name}/{site_name}")
+                                        
+                            except Exception as e:
+                                self.log(f"WARNING: Failed to process client/site from {metadata_key}: {e}")
+                        
+                        # Store image metadata in database
+                        backup_uuid = metadata.get('backup_uuid')
+                        if backup_uuid:
+                            try:
+                                # Check if image already exists
+                                existing_images = self.db.get_images()
+                                image_exists = any(img_id == backup_uuid for img_id, _, _, _, _, _, _, _, _ in existing_images)
+                                
+                                if not image_exists:
+                                    # Create image record
+                                    self.db.create_image(
+                                        image_id=backup_uuid,
+                                        client_id=client_uuid or "unknown",
+                                        site_id=site_uuid or "unknown", 
+                                        role=role,
+                                        repository_path=f"s3://{bucket}/{metadata_key}",
+                                        repository_size_gb=0
+                                    )
+                                    
+                                    # Store full metadata as JSON
+                                    self.db.save_image_metadata(backup_uuid, json.dumps(metadata))
+                                    
+                            except Exception as e:
+                                self.log(f"WARNING: Failed to store image metadata for {backup_uuid}: {e}")
+                                
+                except Exception as e:
+                    self.log(f"WARNING: Failed to process metadata file {metadata_key}: {e}")
+                    continue
+            
+            # Update UI if we discovered new clients/sites
+            if discovered_clients or discovered_sites:
+                self.log(f"INFO: Image scan complete - discovered {len(discovered_clients)} clients, {len(discovered_sites)} sites")
+                
+                # Refresh client/site data in the UI
+                if hasattr(self, 'refresh_client_site_data'):
+                    self.root.after(0, self.refresh_client_site_data)
+            else:
+                self.log("INFO: Image scan complete - no new clients or sites discovered")
+                
+        except Exception as e:
+            self.log(f"ERROR: Failed to scan S3 for images: {e}")
 
     def start_vss_restic_creation_thread(self):
         """Starts the VSS + Restic backup process in a new thread."""

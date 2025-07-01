@@ -1,1 +1,3 @@
-requests 
+# Windows Image Preparation GUI Dependencies
+requests>=2.28.0
+boto3>=1.26.0

@@ -1,0 +1,357 @@
+# Windows Image Preparation GUI - .gitignore
+
+# ==============================================================================
+# Python
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# ==============================================================================
+# Windows
+# ==============================================================================
+
+# Windows thumbnail cache files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Dump file
+*.stackdump
+
+# Folder config file
+[Dd]esktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# ==============================================================================
+# Application-Specific Files
+# ==============================================================================
+
+# Database files (SQLite)
+*.db
+*.sqlite
+*.sqlite3
+pyc.db
+
+# Image files (WIM, VHDX, ISO)
+*.wim
+*.vhdx
+*.iso
+*.vmdk
+*.vhd
+
+# Log files
+*.log
+logs/
+*.txt
+
+# Configuration files with sensitive data
+config.json
+settings.json
+s3_config.json
+
+# Backup and temporary files
+*.bak
+*.tmp
+*.temp
+*~
+.DS_Store
+
+# Application data directories
+Images/
+pyc-restic-repo/
+restic-repo/
+backups/
+
+# Development database location
+%WINDIR%/Temp/pyc.db
+
+# ==============================================================================
+# Development Tools
+# ==============================================================================
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# ==============================================================================
+# Build and Packaging
+# ==============================================================================
+
+# Build artifacts
+build/
+dist/
+*.exe
+*.msi
+
+# PyInstaller build files
+build-arm64.spec
+requirements-arm64.txt
+
+# Batch files (potentially containing sensitive info)
+*.bat
+
+# PowerShell scripts
+*.ps1
+
+# ==============================================================================
+# Restic and Cloud Storage
+# ==============================================================================
+
+# Restic repository data
+restic-repo/
+*.restic
+
+# Cloud storage configuration
+.aws/
+.s3cfg
+
+# ==============================================================================
+# Windows Imaging Specific
+# ==============================================================================
+
+# DISM logs
+dism.log
+CBS.log
+
+# Windows PE files
+winpe/
+boot.wim
+
+# Sysprep files
+sysprep/
+unattend.xml
+
+# VM files
+*.vmx
+*.vmxf
+*.nvram
+*.vmem
+*.vmss
+*.vmsn
+
+# Disk imaging tools
+disk2vhd.exe
+gptgen.exe
+
+# ==============================================================================
+# Documentation and Media
+# ==============================================================================
+
+# Generated documentation
+docs/_build/
+*.pdf
+
+# Screenshots and media
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# ==============================================================================
+# Sensitive Information
+# ==============================================================================
+
+# Credentials and keys
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Environment variables
+.env.local
+.env.production
+
+# ==============================================================================
+# GitHub and CI/CD
+# ==============================================================================
+
+# GitHub workflows (if not using CI/CD)
+# .github/
+
+# Local CI/CD files
+.travis.yml
+.gitlab-ci.yml
+circle.yml
+
+# ==============================================================================
+# macOS (for development on macOS)
+# ==============================================================================
+
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# ==============================================================================
+# Linux (for cross-platform development)
+# ==============================================================================
+
+*~
+
+# temporary files which can be created if a process still has a handle open of a deleted file
+.fuse_hidden*
+
+# KDE directory preferences
+.directory
+
+# Linux trash folder which might appear on any partition or disk
+.Trash-*
+
+# .nfs files are created when an open file is removed but is still being accessed
+.nfs*
+
+# ==============================================================================
+# Project-Specific Exclusions
+# ==============================================================================
+
+# Troubleshooting files
+troubleshoot-disk2vhd.ps1
+
+# VM setup documentation
+vm-setup.md
+
+# Fix scripts
+fix-disk2vhd-permissions.bat
+
+# Mac build scripts
+setup-mac-build.sh
+
+# Docker files (if not using containers)
+# Dockerfile.windows
+
+# ==============================================================================
+# Optional: Include Examples
+# ==============================================================================
+
+# Uncomment if you want to exclude example files
+# examples/
+# samples/
+# test-images/

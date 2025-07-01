@@ -1,0 +1,73 @@
+name: Build Windows Executables
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+jobs:
+  build-windows:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            python-arch: x64
+            artifact-name: "OIP-Windows-x64"
+          # ARM64 support when GitHub adds ARM64 runners
+          # - os: windows-latest-arm64  
+          #   arch: arm64
+          #   python-arch: arm64
+          #   artifact-name: "OIP-Windows-ARM64"
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.python-arch }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller requests
+    
+    - name: Build executable
+      run: |
+        pyinstaller --onefile --windowed --name="${{ matrix.artifact-name }}" `
+                    --exclude-module matplotlib `
+                    --exclude-module numpy `
+                    --exclude-module pandas `
+                    --add-data "requirements.txt;." `
+                    windows_image_prep_gui.py
+    
+    - name: Test executable
+      run: |
+        dist/${{ matrix.artifact-name }}.exe --help
+      continue-on-error: true
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.artifact-name }}
+        path: dist/${{ matrix.artifact-name }}.exe
+        retention-days: 30
+    
+    - name: Upload to release (if release)
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: dist/${{ matrix.artifact-name }}.exe
+        asset_name: ${{ matrix.artifact-name }}.exe
+        asset_content_type: application/octet-stream 

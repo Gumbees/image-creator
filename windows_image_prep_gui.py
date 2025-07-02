@@ -569,6 +569,48 @@ class DatabaseManager:
     def create_site(self, site_id, name, short_name, client_id, description=""):
         """Create a new site with specified UUID"""
         return self.add_site(client_id, name, short_name, description)
+    
+    def add_image(self, client_id, site_id, role, wim_source_path, repository_path, repository_size_gb=0, 
+                 snapshot_count=0, latest_snapshot_id=None, restic_password=None):
+        """Add a new image (alias for create_image for backward compatibility)"""
+        image_id = generate_uuidv7()
+        return self.create_image(image_id, client_id, site_id, role, repository_path, repository_size_gb, 
+                               snapshot_count, latest_snapshot_id, restic_password)
+    
+    def get_client_name(self, client_id):
+        """Get client name by ID"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT name FROM clients WHERE id = ?', (client_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    
+    def get_site_name(self, site_id):
+        """Get site name by ID"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT name FROM sites WHERE id = ?', (site_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    
+    def get_client_by_id(self, client_id):
+        """Get client information by ID"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, name, short_name, description FROM clients WHERE id = ?', (client_id,))
+            return cursor.fetchone()
+    
+    def get_site_by_id(self, site_id):
+        """Get site information by ID"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, client_id, name, short_name, description FROM sites WHERE id = ?', (site_id,))
+            return cursor.fetchone()
+    
+    @property
+    def connection(self):
+        """Get database connection for direct access"""
+        return sqlite3.connect(self.db_path)
 
 class WindowsImagePrepGUI:
     def __init__(self, root):
@@ -611,6 +653,17 @@ class WindowsImagePrepGUI:
         
         # Initialize mode frames (created but hidden)
         self.mode_frames = {}
+        
+        # Initialize step frames for legacy compatibility
+        self.step_frames = {}
+        
+        # Initialize step buttons for legacy compatibility
+        self.step_buttons = {}
+        
+        # Initialize navigation elements for legacy compatibility
+        self.prev_button = None
+        self.next_button = None
+        self.current_step_label = None
         
         # --- Log Area (shared across all modes) ---
         log_frame = ttk.LabelFrame(self.root, text="Process Log", padding="5")
@@ -1903,9 +1956,16 @@ Updated: {image_data['updated_at']}"""
             metadata_key = f"metadata/{image_uuid}.json"
             
             # Set environment variables for AWS CLI
-            os.environ['AWS_ACCESS_KEY_ID'] = s3_config.get('s3_access_key')
-            os.environ['AWS_SECRET_ACCESS_KEY'] = s3_config.get('s3_secret_key')
-            os.environ['AWS_DEFAULT_REGION'] = s3_config.get('s3_region', 'us-east-1')
+            access_key = s3_config.get('s3_access_key')
+            secret_key = s3_config.get('s3_secret_key')
+            region = s3_config.get('s3_region', 'us-east-1')
+            
+            if access_key:
+                os.environ['AWS_ACCESS_KEY_ID'] = access_key
+            if secret_key:
+                os.environ['AWS_SECRET_ACCESS_KEY'] = secret_key
+            if region:
+                os.environ['AWS_DEFAULT_REGION'] = region
             
             # Upload using AWS CLI
             upload_cmd = [
@@ -2179,13 +2239,17 @@ Updated: {image_data['updated_at']}"""
         self.dev_s3_secret_var = tk.StringVar()
         ttk.Entry(s3_frame, textvariable=self.dev_s3_secret_var, width=30, show="*").grid(row=2, column=1, sticky="w", padx=5)
         
-        ttk.Label(s3_frame, text="Region:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Label(s3_frame, text="S3 Endpoint:").grid(row=3, column=0, sticky="w", pady=2)
+        self.dev_s3_endpoint_var = tk.StringVar(value="s3.amazonaws.com")
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_endpoint_var, width=30).grid(row=3, column=1, sticky="w", padx=5)
+        
+        ttk.Label(s3_frame, text="Region:").grid(row=4, column=0, sticky="w", pady=2)
         self.dev_s3_region_var = tk.StringVar(value="us-east-1")
-        ttk.Entry(s3_frame, textvariable=self.dev_s3_region_var, width=30).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Entry(s3_frame, textvariable=self.dev_s3_region_var, width=30).grid(row=4, column=1, sticky="w", padx=5)
         
         # Load and scan S3 button
         ttk.Button(s3_frame, text="Load S3 Metadata & Scan Images", 
-                  command=self.load_s3_and_scan_dev_mode).grid(row=4, column=0, columnspan=2, pady=10)
+                  command=self.load_s3_and_scan_dev_mode).grid(row=5, column=0, columnspan=2, pady=10)
         
         # Client/Site/Image Selection Section
         selection_frame = ttk.LabelFrame(develop_frame, text="Image Configuration", padding="10")
@@ -2239,12 +2303,12 @@ Updated: {image_data['updated_at']}"""
         action_frame.pack(fill="x", pady=10)
         
         # Create new development image button
-        ttk.Button(action_frame, text="🔧 Create New Development Image", 
+        ttk.Button(action_frame, text="Create New Development Image", 
                   command=self.create_dev_image, 
                   style="Large.TButton").pack(side="left", padx=(0, 10))
         
         # Update existing image button  
-        ttk.Button(action_frame, text="📝 Update Selected Image", 
+        ttk.Button(action_frame, text="Update Selected Image", 
                   command=self.update_dev_image,
                   style="Large.TButton").pack(side="left")
         
@@ -2260,6 +2324,7 @@ Updated: {image_data['updated_at']}"""
                 self.dev_s3_bucket_var.set(config.get("s3_bucket", ""))
                 self.dev_s3_access_var.set(config.get("s3_access_key", ""))
                 self.dev_s3_secret_var.set(config.get("s3_secret_key", ""))
+                self.dev_s3_endpoint_var.set(config.get("s3_endpoint", "s3.amazonaws.com"))
                 self.dev_s3_region_var.set(config.get("s3_region", "us-east-1"))
                 self.log(f"INFO: Loaded existing S3 configuration from development database")
                 
@@ -2280,11 +2345,12 @@ Updated: {image_data['updated_at']}"""
                 "s3_bucket": self.dev_s3_bucket_var.get(),
                 "s3_access_key": self.dev_s3_access_var.get(),
                 "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_endpoint": self.dev_s3_endpoint_var.get(),
                 "s3_region": self.dev_s3_region_var.get()
             }
             
             # Validate configuration
-            if not all([s3_config["s3_bucket"], s3_config["s3_access_key"], s3_config["s3_secret_key"]]):
+            if not all([s3_config["s3_bucket"], s3_config["s3_access_key"], s3_config["s3_secret_key"], s3_config["s3_endpoint"]]):
                 messagebox.showerror("Error", "Please fill in all S3 configuration fields")
                 return
             
@@ -2319,6 +2385,7 @@ Updated: {image_data['updated_at']}"""
                 "s3_bucket": self.dev_s3_bucket_var.get(),
                 "s3_access_key": self.dev_s3_access_var.get(),
                 "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_endpoint": self.dev_s3_endpoint_var.get(),
                 "s3_region": self.dev_s3_region_var.get()
             }
             
@@ -2336,12 +2403,18 @@ Updated: {image_data['updated_at']}"""
                 from botocore.exceptions import ClientError, NoCredentialsError
                 
                 # Create S3 client
-                s3_client = boto3.client(
-                    's3',
-                    aws_access_key_id=s3_config["s3_access_key"],
-                    aws_secret_access_key=s3_config["s3_secret_key"],
-                    region_name=s3_config["s3_region"]
-                )
+                s3_client_kwargs = {
+                    'aws_access_key_id': s3_config["s3_access_key"],
+                    'aws_secret_access_key': s3_config["s3_secret_key"],
+                    'region_name': s3_config["s3_region"]
+                }
+                
+                # Add endpoint URL if not using AWS S3
+                s3_endpoint = s3_config.get("s3_endpoint", "s3.amazonaws.com")
+                if s3_endpoint != "s3.amazonaws.com":
+                    s3_client_kwargs["endpoint_url"] = f"https://{s3_endpoint}"
+                
+                s3_client = boto3.client('s3', **s3_client_kwargs)
                 
                 # List all metadata files in bucket root /metadata/ folder
                 try:
@@ -2631,6 +2704,7 @@ Updated: {image_data['updated_at']}"""
                 "s3_bucket": self.dev_s3_bucket_var.get(),
                 "s3_access_key": self.dev_s3_access_var.get(),
                 "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_endpoint": self.dev_s3_endpoint_var.get(),
                 "s3_region": self.dev_s3_region_var.get()
             }
             
@@ -2663,12 +2737,18 @@ Updated: {image_data['updated_at']}"""
                 from botocore.exceptions import ClientError, NoCredentialsError
                 
                 # Create S3 client
-                s3_client = boto3.client(
-                    's3',
-                    aws_access_key_id=s3_config["s3_access_key"],
-                    aws_secret_access_key=s3_config["s3_secret_key"],
-                    region_name=s3_config["s3_region"]
-                )
+                s3_client_kwargs = {
+                    'aws_access_key_id': s3_config["s3_access_key"],
+                    'aws_secret_access_key': s3_config["s3_secret_key"],
+                    'region_name': s3_config["s3_region"]
+                }
+                
+                # Add endpoint URL if not using AWS S3
+                s3_endpoint = s3_config.get("s3_endpoint", "s3.amazonaws.com")
+                if s3_endpoint != "s3.amazonaws.com":
+                    s3_client_kwargs["endpoint_url"] = f"https://{s3_endpoint}"
+                
+                s3_client = boto3.client('s3', **s3_client_kwargs)
                 
                 # Convert metadata to JSON string
                 metadata_json = json.dumps(metadata, indent=2)
@@ -2832,27 +2912,47 @@ Updated: {image_data['updated_at']}"""
             client_short = self.dev_client_var.get().split(' (')[0]
             site_short = self.dev_site_var.get().split(' (')[0] if self.dev_site_var.get() else ""
             
-            client = self.db_manager.find_client_by_short_name(client_short)
-            site = self.db_manager.get_site_by_short_name(site_short) if site_short else None
+            # Look up client in S3 metadata instead of database
+            client_uuid = None
+            client_name = None
+            client_data = None
             
-            if not client:
-                self.log("ERROR: Client not found")
+            if hasattr(self, 's3_clients'):
+                for uuid, data in self.s3_clients.items():
+                    if data['short_name'] == client_short:
+                        client_uuid = uuid
+                        client_name = data['name']
+                        client_data = data
+                        break
+            
+            if not client_uuid:
+                self.log("ERROR: Client not found in S3 metadata")
                 return
+            
+            # Look up site in S3 metadata if specified
+            site_uuid = None
+            site_name = None
+            if site_short and client_data:
+                for uuid, site_data in client_data['sites'].items():
+                    if site_data['short_name'] == site_short:
+                        site_uuid = uuid
+                        site_name = site_data['name']
+                        break
             
             # Build backup tags for development
             backup_tags = [
-                f"client-uuid:{client[0]}",
-                f"client-name:{client[1]}",
+                f"client-uuid:{client_uuid}",
+                f"client-name:{client_name}",
                 f"environment:development",
                 f"role:{self.dev_role_var.get()}",
                 f"backup-uuid:{generate_uuidv7()}",
                 f"created-date:{datetime.now().isoformat()}"
             ]
             
-            if site:
+            if site_uuid:
                 backup_tags.extend([
-                    f"site-uuid:{site[0]}",
-                    f"site-name:{site[1]}"
+                    f"site-uuid:{site_uuid}",
+                    f"site-name:{site_name}"
                 ])
             
             # Add hardware info
@@ -2862,13 +2962,24 @@ Updated: {image_data['updated_at']}"""
                     if value:
                         backup_tags.append(f"hw-{key}:{value}")
             
+            # Store backup tags for use by perform_restic_backup
+            self._current_backup_tags = backup_tags
+            
+            # Download restic executable first
+            restic_exe = self.download_restic()
+            if not restic_exe:
+                self.log("ERROR: Failed to download or locate restic.exe")
+                return
+            
+            self.log(f"INFO: Using restic executable: {restic_exe}")
+            
             # Perform the actual backup using existing restic functionality
-            success = self.perform_restic_backup(backup_tags)
+            success = self.perform_restic_backup(restic_exe)
             
             if success:
                 self.log("SUCCESS: Development image backup completed!")
                 # Refresh the images list
-                self.root.after(0, lambda: self.load_dev_images_for_client(client[0]))
+                self.root.after(0, lambda: self.load_dev_images_for_client_from_s3(client_uuid))
             else:
                 self.log("ERROR: Development image backup failed")
                 
@@ -2959,7 +3070,8 @@ Updated: {image_data['updated_at']}"""
                 "Capture to WIM",
                 "Deploy WIM"
             ]
-            self.current_step_label.config(text=f"Current Step: {step_number} - {step_names[step_number-1]}")
+            if self.current_step_label:
+                self.current_step_label.config(text=f"Current Step: {step_number} - {step_names[step_number-1]}")
             
             # Update step button styles
             for i, button in self.step_buttons.items():
@@ -2976,8 +3088,10 @@ Updated: {image_data['updated_at']}"""
                     button.config(style='TButton')
             
             # Update navigation buttons
-            self.prev_button.config(state="normal" if step_number > 1 else "disabled")
-            self.next_button.config(state="normal" if step_number < self.total_steps else "disabled")
+            if self.prev_button:
+                self.prev_button.config(state="normal" if step_number > 1 else "disabled")
+            if self.next_button:
+                self.next_button.config(state="normal" if step_number < self.total_steps else "disabled")
             
             # Log the navigation
             self.log(f"INFO: Navigated to Step {step_number} - {step_names[step_number-1]}")
@@ -5235,7 +5349,7 @@ detach vdisk
         # Double-click triggers restore to working VHDX
         self.restore_image_to_vhdx(selection[0])
 
-    def show_image_details(self, item_id):
+    def show_repository_details(self, item_id):
         """Show detailed information about a repository"""
         try:
             item = self.images_tree.item(item_id)
@@ -7812,7 +7926,7 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                 
             if repo_type.get() == "s3":
                 # Validate S3 configuration
-                s3_config = self.db.get_s3_config()
+                s3_config = self.get_s3_config_for_mode()
                 if not s3_config or not all([s3_config.get('s3_bucket'), s3_config.get('s3_access_key'), s3_config.get('s3_secret_key')]):
                     self.log("ERROR: S3 configuration incomplete. Please configure S3 settings.")
                     self.log("SOLUTION: Click 'Configure S3...' button to set up S3 credentials")
@@ -7864,11 +7978,18 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             
             # Set up environment
             env = os.environ.copy()
-            env['RESTIC_PASSWORD'] = "defaultpassword"  # This should be configurable
+            
+            # Get or generate secure repository password
+            repo_password = self.get_or_generate_repository_password()
+            if not repo_password:
+                self.log("ERROR: Failed to get or generate repository password")
+                return False
+            
+            env['RESTIC_PASSWORD'] = repo_password
             
             repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
             if repo_type == "s3":
-                s3_config = self.db.get_s3_config()
+                s3_config = self.get_s3_config_for_mode()
                 
                 # Build organized S3 path structure
                 s3_repo_path = self.build_s3_repository_path(s3_config)
@@ -7876,8 +7997,10 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                     return False
                     
                 env['RESTIC_REPOSITORY'] = s3_repo_path
-                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
-                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
+                if s3_config and s3_config.get('s3_access_key'):
+                    env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+                if s3_config and s3_config.get('s3_secret_key'):
+                    env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
             else:
                 repo_path = self.repo_location_var.get()
                 env['RESTIC_REPOSITORY'] = repo_path
@@ -7885,36 +8008,53 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                 # Create local directory if it doesn't exist
                 Path(repo_path).mkdir(parents=True, exist_ok=True)
             
-            # Check if repository exists
-            check_cmd = [str(restic_exe), "snapshots", "--json"]
-            self.log("INFO: Checking if repository exists...")
+            # Try to initialize repository first to determine if it exists
+            self.log("INFO: Checking repository status...")
             
-            check_proc = subprocess.run(
-                check_cmd,
+            # Try to initialize - this will fail if repository already exists
+            init_cmd = [str(restic_exe), "init"]
+            init_proc = subprocess.run(
+                init_cmd,
                 env=env,
                 capture_output=True,
                 text=True
             )
             
-            if check_proc.returncode == 0:
-                self.log("INFO: Repository already exists and is accessible")
+            if init_proc.returncode == 0:
+                # Repository was successfully initialized (was new)
+                self.log("SUCCESS: New restic repository initialized successfully")
                 return True
             else:
-                # Repository doesn't exist, initialize it
-                self.log("INFO: Repository not found, initializing new repository...")
-                init_cmd = [str(restic_exe), "init"]
-                
-                init_proc = subprocess.run(
-                    init_cmd,
-                    env=env,
-                    capture_output=True,
-                    text=True
-                )
-                
-                if init_proc.returncode == 0:
-                    self.log("SUCCESS: Repository initialized successfully")
-                    return True
+                # Check if failure was due to existing repository
+                if "already initialized" in init_proc.stderr:
+                    self.log("INFO: Repository already exists - requesting password confirmation...")
+                    
+                    # Prompt user for existing repository password
+                    confirmed_password = self.prompt_repository_password_confirmation()
+                    if not confirmed_password:
+                        self.log("ERROR: Password confirmation cancelled or failed")
+                        return False
+                    
+                    # Update environment with confirmed password
+                    env['RESTIC_PASSWORD'] = confirmed_password
+                    
+                    # Verify password works
+                    verify_cmd = [str(restic_exe), "snapshots", "--json", "--last", "1"]
+                    verify_proc = subprocess.run(
+                        verify_cmd,
+                        env=env,
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if verify_proc.returncode == 0:
+                        self.log("SUCCESS: Repository password verified successfully")
+                        return True
+                    else:
+                        self.log("ERROR: Repository password verification failed - incorrect password")
+                        return False
                 else:
+                    # Some other initialization error
                     self.log(f"ERROR: Repository initialization failed: {init_proc.stderr}")
                     return False
                     
@@ -7922,41 +8062,385 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             self.log(f"ERROR: Repository initialization failed: {e}")
             return False
 
-    def build_s3_repository_path(self, s3_config):
-        """Build organized S3 repository path: bucket/client-uuid/development|production"""
+    def get_s3_config_for_mode(self):
+        """Get S3 configuration based on current workflow mode"""
+        workflow_mode = self.get_workflow_mode()
+        
+        if workflow_mode == "development":
+            # Development mode: use UI variables
+            return {
+                "s3_bucket": self.dev_s3_bucket_var.get(),
+                "s3_access_key": self.dev_s3_access_var.get(),
+                "s3_secret_key": self.dev_s3_secret_var.get(),
+                "s3_endpoint": self.dev_s3_endpoint_var.get(),
+                "s3_region": self.dev_s3_region_var.get()
+            }
+        else:
+            # Production mode: use database
+            return self.db.get_s3_config()
+
+    def get_or_generate_repository_password(self):
+        """Get existing repository password or generate a new secure one"""
         try:
-            # Get client UUID
+            # Get current client/site information for password identification
+            workflow_mode = self.get_workflow_mode()
             client_uuid = None
-            client_name = getattr(self, 'client_var', None)
-            if client_name and client_name.get() and client_name.get() != "-- Select Client --":
-                try:
-                    clients = self.db.get_clients()
-                    for cid, name, short_name, desc in clients:
-                        if name == client_name.get():
-                            client_uuid = cid
-                            break
-                except Exception as e:
-                    self.log(f"WARNING: Could not retrieve client UUID: {e}")
+            site_uuid = None
+            client_name = "unknown"
+            site_name = "unknown"
+            
+            if workflow_mode == "development":
+                # Development mode: use dev_client_var and S3 metadata
+                if hasattr(self, 'dev_client_var') and self.dev_client_var.get():
+                    client_short = self.dev_client_var.get().split(' (')[0]
+                    if hasattr(self, 's3_clients'):
+                        for uuid, data in self.s3_clients.items():
+                            if data['short_name'] == client_short:
+                                client_uuid = uuid
+                                client_name = data['name']
+                                break
+                
+                if hasattr(self, 'dev_site_var') and self.dev_site_var.get():
+                    site_short = self.dev_site_var.get().split(' (')[0]
+                    if hasattr(self, 's3_sites'):
+                        for uuid, data in self.s3_sites.items():
+                            if data['short_name'] == site_short:
+                                site_uuid = uuid
+                                site_name = data['name']
+                                break
+            else:
+                # Production mode: use client_var and database
+                client_var = getattr(self, 'client_var', None)
+                if client_var and client_var.get() and client_var.get() != "-- Select Client --":
+                    try:
+                        clients = self.db.get_clients()
+                        for cid, name, short_name, desc in clients:
+                            if name == client_var.get():
+                                client_uuid = cid
+                                client_name = name
+                                break
+                    except Exception as e:
+                        self.log(f"WARNING: Could not retrieve client info: {e}")
+                
+                site_var = getattr(self, 'site_var', None)
+                if site_var and site_var.get() and site_var.get() != "-- Select Site --":
+                    try:
+                        sites = self.db.get_sites()
+                        for sid, client_id, name, short_name, desc, client_name_db in sites:
+                            if name == site_var.get():
+                                site_uuid = sid
+                                site_name = name
+                                break
+                    except Exception as e:
+                        self.log(f"WARNING: Could not retrieve site info: {e}")
+            
+            # Create a unique identifier for this repository
+            repo_identifier = f"{client_uuid or 'default-client'}_{site_uuid or 'default-site'}_backup"
+            
+            # Try to get existing password from database config
+            existing_password = self.db.get_config(f"restic_password_{repo_identifier}")
+            
+            if existing_password:
+                self.log("INFO: Using existing repository password")
+                return existing_password
+            
+            # Generate new secure password
+            self.log("INFO: Generating new secure repository password...")
+            role = getattr(self, 'role_var', None)
+            role_name = role.get() if role else "backup"
+            
+            new_password, password_identifier = self.db.generate_secure_password(client_name, site_name, role_name)
+            
+            # Store the password in database for future use
+            self.db.set_config(f"restic_password_{repo_identifier}", new_password)
+            
+            # Display password to user for record keeping
+            self.show_repository_password_reminder(new_password, password_identifier, client_name, site_name, role_name)
+            
+            self.log("SUCCESS: Repository password generated and stored")
+            return new_password
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to get or generate repository password: {e}")
+            return None
+
+    def show_repository_password_reminder(self, password, identifier, client_name="", site_name="", role=""):
+        """Show dialog to remind user to save the repository password"""
+        try:
+            dialog = self.create_centered_dialog("🔐 Repository Password - SAVE THIS!", 700, 500)
+            
+            # Warning frame
+            warning_frame = ttk.LabelFrame(dialog, text="⚠️ CRITICAL - Repository Password", padding="15")
+            warning_frame.pack(fill="x", padx=20, pady=(20, 10))
+            
+            warning_text = """This is your RESTIC REPOSITORY PASSWORD. You MUST save this password!
+
+• Without this password, you CANNOT access your backups
+• This password is required for ALL restore operations
+• Store this password in your password manager
+• Make a backup copy in a secure location
+
+LOSING THIS PASSWORD = LOSING ALL YOUR BACKUPS!"""
+            
+            ttk.Label(warning_frame, text=warning_text, 
+                     font=("TkDefaultFont", 10, "bold"), 
+                     foreground="red", justify="left").pack()
+            
+            # Repository info frame
+            info_frame = ttk.LabelFrame(dialog, text="Repository Information", padding="15")
+            info_frame.pack(fill="x", padx=20, pady=10)
+            info_frame.columnconfigure(1, weight=1)
+            
+            ttk.Label(info_frame, text="Client:", font=("TkDefaultFont", 9, "bold")).grid(row=0, column=0, sticky="w", pady=2)
+            ttk.Label(info_frame, text=client_name).grid(row=0, column=1, sticky="w", padx=(10, 0), pady=2)
+            
+            ttk.Label(info_frame, text="Site:", font=("TkDefaultFont", 9, "bold")).grid(row=1, column=0, sticky="w", pady=2)
+            ttk.Label(info_frame, text=site_name).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=2)
+            
+            ttk.Label(info_frame, text="Role:", font=("TkDefaultFont", 9, "bold")).grid(row=2, column=0, sticky="w", pady=2)
+            ttk.Label(info_frame, text=role).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=2)
+            
+            ttk.Label(info_frame, text="Repository ID:", font=("TkDefaultFont", 9, "bold")).grid(row=3, column=0, sticky="w", pady=2)
+            ttk.Label(info_frame, text=identifier).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=2)
+            
+            # Password frame
+            password_frame = ttk.LabelFrame(dialog, text="Repository Password", padding="15")
+            password_frame.pack(fill="x", padx=20, pady=10)
+            
+            # Password display with copy button
+            password_display_frame = ttk.Frame(password_frame)
+            password_display_frame.pack(fill="x", pady=5)
+            
+            password_entry = ttk.Entry(password_display_frame, font=("Consolas", 12), width=50)
+            password_entry.pack(side="left", fill="x", expand=True)
+            password_entry.insert(0, password)
+            password_entry.config(state="readonly")
+            
+            def copy_password():
+                dialog.clipboard_clear()
+                dialog.clipboard_append(password)
+                copy_btn.config(text="✓ Copied!")
+                dialog.after(2000, lambda: copy_btn.config(text="📋 Copy"))
+            
+            copy_btn = ttk.Button(password_display_frame, text="📋 Copy", command=copy_password, width=10)
+            copy_btn.pack(side="right", padx=(10, 0))
+            
+            # Instructions
+            instructions_frame = ttk.LabelFrame(dialog, text="Next Steps", padding="15")
+            instructions_frame.pack(fill="x", padx=20, pady=10)
+            
+            instructions = """1. IMMEDIATELY copy this password to your password manager
+2. Create a backup copy and store it securely
+3. Test that you can access the password when needed
+4. Click 'I Have Saved The Password' only after completing steps 1-3"""
+            
+            ttk.Label(instructions_frame, text=instructions, justify="left").pack()
+            
+            # Button frame
+            button_frame = ttk.Frame(dialog)
+            button_frame.pack(fill="x", padx=20, pady=20)
+            
+            saved_var = tk.BooleanVar()
+            
+            def acknowledge():
+                if saved_var.get():
+                    dialog.destroy()
+                else:
+                    messagebox.showwarning("Password Not Saved", 
+                                         "Please check the box to confirm you have saved the password!")
+            
+            ttk.Checkbutton(button_frame, text="✅ I have saved this password in a secure location", 
+                           variable=saved_var).pack(pady=10)
+            
+            ttk.Button(button_frame, text="I Have Saved The Password", 
+                      command=acknowledge, style="Accent.TButton").pack(pady=10)
+            
+            # Make dialog modal
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.focus_set()
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to show password reminder: {e}")
+
+    def prompt_repository_password_confirmation(self):
+        """Prompt user to enter repository password for existing repositories"""
+        try:
+            # Get repository information for context
+            workflow_mode = self.get_workflow_mode()
+            client_name = "Unknown"
+            site_name = "Unknown"
+            repo_identifier = "unknown"
+            
+            if workflow_mode == "development":
+                # Development mode: get info from S3 metadata
+                if hasattr(self, 'dev_client_var') and self.dev_client_var.get():
+                    client_short = self.dev_client_var.get().split(' (')[0]
+                    if hasattr(self, 's3_clients'):
+                        for uuid, data in self.s3_clients.items():
+                            if data['short_name'] == client_short:
+                                client_name = data['name']
+                                break
+                
+                if hasattr(self, 'dev_site_var') and self.dev_site_var.get():
+                    site_short = self.dev_site_var.get().split(' (')[0]
+                    if hasattr(self, 's3_sites'):
+                        for uuid, data in self.s3_sites.items():
+                            if data['short_name'] == site_short:
+                                site_name = data['name']
+                                break
+            
+            dialog = self.create_centered_dialog("🔐 Repository Password Required", 600, 400)
+            
+            # Main instruction frame
+            instruction_frame = ttk.LabelFrame(dialog, text="Repository Access", padding="15")
+            instruction_frame.pack(fill="x", padx=20, pady=(20, 10))
+            
+            instruction_text = f"""An existing restic repository was found for:
+
+Client: {client_name}
+Site: {site_name}
+
+Please enter the repository password to continue with the backup.
+This password was shown when the repository was first created."""
+            
+            ttk.Label(instruction_frame, text=instruction_text, justify="left").pack()
+            
+            # Password input frame
+            password_frame = ttk.LabelFrame(dialog, text="Enter Repository Password", padding="15")
+            password_frame.pack(fill="x", padx=20, pady=10)
+            
+            ttk.Label(password_frame, text="Repository Password:").pack(anchor="w", pady=(0, 5))
+            
+            password_var = tk.StringVar()
+            password_entry = ttk.Entry(password_frame, textvariable=password_var, show="*", width=40, font=("Consolas", 10))
+            password_entry.pack(fill="x", pady=(0, 10))
+            password_entry.focus_set()
+            
+            # Show/hide password option
+            show_password_var = tk.BooleanVar()
+            def toggle_password_visibility():
+                if show_password_var.get():
+                    password_entry.config(show="")
+                else:
+                    password_entry.config(show="*")
+            
+            ttk.Checkbutton(password_frame, text="Show password", 
+                           variable=show_password_var, 
+                           command=toggle_password_visibility).pack(anchor="w")
+            
+            # Hint frame
+            hint_frame = ttk.LabelFrame(dialog, text="Password Help", padding="10")
+            hint_frame.pack(fill="x", padx=20, pady=10)
+            
+            hint_text = """💡 Hint: The repository password was displayed when this repository was first created.
+Check your password manager or secure notes where you saved it."""
+            
+            ttk.Label(hint_frame, text=hint_text, justify="left", foreground="blue").pack()
+            
+            # Result variables
+            result = {"password": None, "cancelled": False}
+            
+            # Button frame
+            button_frame = ttk.Frame(dialog)
+            button_frame.pack(fill="x", padx=20, pady=20)
+            
+            def confirm_password():
+                password = password_var.get().strip()
+                if not password:
+                    messagebox.showwarning("Password Required", "Please enter the repository password.")
+                    password_entry.focus_set()
+                    return
+                
+                result["password"] = password
+                dialog.destroy()
+            
+            def cancel_password():
+                result["cancelled"] = True
+                dialog.destroy()
+            
+            # Buttons
+            button_container = ttk.Frame(button_frame)
+            button_container.pack()
+            
+            ttk.Button(button_container, text="Cancel", command=cancel_password).pack(side="left", padx=(0, 10))
+            ttk.Button(button_container, text="Continue with Backup", command=confirm_password, 
+                      style="Accent.TButton").pack(side="left")
+            
+            # Enter key binding
+            password_entry.bind('<Return>', lambda e: confirm_password())
+            
+            # Make dialog modal
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # Wait for dialog to close
+            dialog.wait_window()
+            
+            if result["cancelled"]:
+                return None
+            
+            return result["password"]
+            
+        except Exception as e:
+            self.log(f"ERROR: Failed to prompt for repository password: {e}")
+            return None
+
+    def build_s3_repository_path(self, s3_config):
+        """Build organized S3 repository path: bucket/client-uuid"""
+        try:
+            # Validate S3 config
+            if not s3_config:
+                self.log("ERROR: S3 configuration is None")
+                return None
+            
+            if not isinstance(s3_config, dict):
+                self.log("ERROR: S3 configuration is not a dictionary")
+                return None
+            
+            required_keys = ['s3_endpoint', 's3_bucket']
+            for key in required_keys:
+                if key not in s3_config:
+                    self.log(f"ERROR: Missing required S3 config key: {key}")
+                    return None
+            
+            # Get client UUID based on workflow mode
+            client_uuid = None
+            workflow_mode = self.get_workflow_mode()
+            
+            if workflow_mode == "development":
+                # Development mode: use dev_client_var and S3 metadata
+                if hasattr(self, 'dev_client_var') and self.dev_client_var.get():
+                    client_short = self.dev_client_var.get().split(' (')[0]
+                    if hasattr(self, 's3_clients'):
+                        for uuid, data in self.s3_clients.items():
+                            if data['short_name'] == client_short:
+                                client_uuid = uuid
+                                break
+            else:
+                # Production mode: use client_var and database
+                client_name = getattr(self, 'client_var', None)
+                if client_name and client_name.get() and client_name.get() != "-- Select Client --":
+                    try:
+                        clients = self.db.get_clients()
+                        for cid, name, short_name, desc in clients:
+                            if name == client_name.get():
+                                client_uuid = cid
+                                break
+                    except Exception as e:
+                        self.log(f"WARNING: Could not retrieve client UUID: {e}")
             
             # If no client selected, use a default folder
             if not client_uuid:
                 client_uuid = "default-client"
                 self.log("WARNING: No client selected, using default client folder")
             
-            # Determine environment (for now, always development)
-            workflow_mode = self.get_workflow_mode()
-            if workflow_mode == "production":
-                environment = "production"
-            else:
-                environment = "development"  # Default to development
-            
-            # Build S3 path: s3:endpoint/bucket/client-uuid/environment
-            s3_path = f"s3:{s3_config['s3_endpoint']}/{s3_config['s3_bucket']}/{client_uuid}/{environment}"
+            # Build S3 path: s3:endpoint/bucket/client-uuid (no environment subfolder)
+            s3_path = f"s3:{s3_config['s3_endpoint']}/{s3_config['s3_bucket']}/{client_uuid}"
             
             self.log(f"INFO: S3 repository structure:")
             self.log(f"  └── Bucket: {s3_config['s3_bucket']}")
             self.log(f"      └── Client: {client_uuid}")
-            self.log(f"          └── Environment: {environment}")
             self.log(f"INFO: Full S3 path: {s3_path}")
             
             return s3_path
@@ -8032,7 +8516,7 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             
             if repo_type.get() == "s3":
                 try:
-                    s3_config = self.db.get_s3_config()
+                    s3_config = self.get_s3_config_for_mode()
                     if s3_config:
                         tags.append(f"s3-bucket:{s3_config.get('s3_bucket', 'unknown')}")
                         tags.append(f"s3-endpoint:{s3_config.get('s3_endpoint', 'unknown')}")
@@ -8074,7 +8558,7 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
         workflow_mode = self.get_workflow_mode()
         tags.append(f"workflow-mode:{workflow_mode}")
         
-        # Environment tag for S3 folder structure
+        # Environment tag for organizational purposes
         if workflow_mode == "production":
             environment = "production"
         else:
@@ -8225,16 +8709,24 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             # Check if user wants OS-only backup
             os_only = getattr(self, 'capture_os_only_var', None)
             if os_only and os_only.get():
-                self.log("INFO: Starting Restic backup (OS files only) with automatic VSS support...")
+                self.log("INFO: Starting Restic backup (OS files only) with Volume Shadow Copy (VSS)...")
             else:
-                self.log("INFO: Starting Restic backup (full C: drive) with automatic VSS support...")
+                self.log("INFO: Starting Restic backup (full C: drive) with Volume Shadow Copy (VSS)...")
             
-            # Generate comprehensive tags with UUIDs and metadata
-            backup_tags = self.generate_backup_tags()
+            # Use custom backup tags if provided, otherwise generate them
+            if hasattr(self, '_current_backup_tags') and self._current_backup_tags:
+                backup_tags = self._current_backup_tags
+                self.log("INFO: Using custom backup tags for development mode")
+                # Clear the custom tags after use
+                delattr(self, '_current_backup_tags')
+            else:
+                # Generate comprehensive tags with UUIDs and metadata
+                backup_tags = self.generate_backup_tags()
             
-            # Build restic backup command (VSS is automatic on Windows)
+            # Build restic backup command with explicit VSS support
             backup_cmd = [
                 str(restic_exe), "backup", "C:/", 
+                "--use-fs-snapshot",  # Enable Volume Shadow Copy on Windows
                 "--verbose",
                 "--with-atime"  # Include access time (useful for Windows)
             ]
@@ -8277,11 +8769,10 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
             
             # Set environment variables for repository
             env = os.environ.copy()
-            env['RESTIC_PASSWORD'] = "defaultpassword"  # This should be configurable
             
             repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
             if repo_type == "s3":
-                s3_config = self.db.get_s3_config()
+                s3_config = self.get_s3_config_for_mode()
                 
                 # Build organized S3 path structure
                 s3_repo_path = self.build_s3_repository_path(s3_config)
@@ -8290,10 +8781,68 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                     return False
                     
                 env['RESTIC_REPOSITORY'] = s3_repo_path
-                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
-                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
+                if s3_config and s3_config.get('s3_access_key'):
+                    env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
+                if s3_config and s3_config.get('s3_secret_key'):
+                    env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
             else:
                 env['RESTIC_REPOSITORY'] = self.repo_location_var.get()
+            
+            # Try to initialize a new repository first to determine if it exists
+            self.log("INFO: Checking repository status...")
+            
+            # Generate new password for potential new repository
+            repo_password = self.get_or_generate_repository_password()
+            if not repo_password:
+                self.log("ERROR: Failed to get or generate repository password")
+                return False
+            
+            env['RESTIC_PASSWORD'] = repo_password
+            
+            # Try to initialize - this will fail if repository already exists
+            init_cmd = [str(restic_exe), "init"]
+            init_proc = subprocess.run(
+                init_cmd,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            
+            if init_proc.returncode == 0:
+                # Repository was successfully initialized (was new)
+                self.log("SUCCESS: New restic repository initialized successfully")
+            else:
+                # Check if failure was due to existing repository
+                if "already initialized" in init_proc.stderr:
+                    self.log("INFO: Repository already exists - requesting password confirmation...")
+                    
+                    # Prompt user for existing repository password
+                    confirmed_password = self.prompt_repository_password_confirmation()
+                    if not confirmed_password:
+                        self.log("ERROR: Password confirmation cancelled or failed")
+                        return False
+                    
+                    # Update environment with confirmed password
+                    env['RESTIC_PASSWORD'] = confirmed_password
+                    
+                    # Verify password works
+                    verify_cmd = [str(restic_exe), "snapshots", "--json", "--last", "1"]
+                    verify_proc = subprocess.run(
+                        verify_cmd,
+                        env=env,
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if verify_proc.returncode == 0:
+                        self.log("SUCCESS: Repository password verified successfully")
+                    else:
+                        self.log("ERROR: Repository password verification failed - incorrect password")
+                        return False
+                else:
+                    # Some other initialization error
+                    self.log(f"ERROR: Repository initialization failed: {init_proc.stderr}")
+                    return False
             
             self.log(f"INFO: Running backup command with {len(backup_cmd)} arguments")
             
@@ -8478,10 +9027,7 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                 self.log("ERROR: No S3 configuration found")
                 return False
             
-            # Build S3 metadata file path in the same client/environment structure
-            client_uuid = tag_dict.get('client-uuid', 'default-client')
-            environment = tag_dict.get('environment', 'development')
-            
+            # Build S3 metadata file path in root metadata folder
             # Create JSON content
             json_content = json.dumps(metadata, indent=2, ensure_ascii=False)
             
@@ -8492,8 +9038,8 @@ Type 'I UNDERSTAND THE RISK' below to confirm:"""
                 temp_file_path = temp_file.name
             
             try:
-                # Use AWS CLI to upload metadata file to S3
-                s3_metadata_path = f"s3://{s3_config['s3_bucket']}/{client_uuid}/{environment}/metadata/{backup_uuid}.json"
+                # Use AWS CLI to upload metadata file to S3 root metadata folder
+                s3_metadata_path = f"s3://{s3_config['s3_bucket']}/metadata/{backup_uuid}.json"
                 
                 # Set up environment for AWS CLI
                 env = os.environ.copy()

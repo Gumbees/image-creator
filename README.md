@@ -18,6 +18,17 @@ A professional-grade Windows system imaging and backup tool using modern Restic 
 - **Python 3.8+** (64-bit recommended)
 - **S3-compatible storage** (Backblaze B2, AWS S3, MinIO, etc.)
 
+## ⚠️ Important: Windows Defender Exclusion
+
+**CRITICAL**: You must exclude `restic.exe` from Windows Defender to prevent backup failures and performance issues:
+
+1. **Open Windows Security**: Press `Win + I` → **Update & Security** → **Windows Security** → **Virus & threat protection**
+2. **Add Exclusion**: Click **"Manage settings"** under Virus & threat protection settings → **"Add or remove exclusions"** → **"Add an exclusion"** → **"Process"**
+3. **Enter Process Name**: Type `restic.exe` exactly
+4. **Save**: Click **"Add"** to confirm
+
+**Why this matters**: Windows Defender can interfere with restic's backup operations, causing failures or significantly slowing down the backup process.
+
 ## 🚀 Quick Setup Guide
 
 ### Step 1: Install Python 3 (64-bit)

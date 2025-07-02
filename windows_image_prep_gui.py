@@ -8745,6 +8745,8 @@ Check your password manager or secure notes where you saved it."""
                 "C:/Windows/SoftwareDistribution/*",  # Windows Update files
                 "C:/Windows/Installer/*",  # MSI installer cache
                 "C:/ProgramData/Microsoft/Windows/WER/*",  # Windows Error Reporting
+                "*/OneDrive*",  # OneDrive cloud-only files that cause VSS issues
+                "*OneDrive*",   # Additional OneDrive pattern
             ]
             
             for exclusion in exclusions:
@@ -8805,7 +8807,9 @@ Check your password manager or secure notes where you saved it."""
                 init_cmd,
                 env=env,
                 capture_output=True,
-                text=True
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
             )
             
             if init_proc.returncode == 0:
@@ -8852,6 +8856,8 @@ Check your password manager or secure notes where you saved it."""
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 env=env
             )
             

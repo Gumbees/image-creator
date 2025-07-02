@@ -1902,45 +1902,62 @@ Updated: {image_data['updated_at']}"""
         try:
             # Check if we're using S3
             repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "local"
+            self.log(f"DEBUG: repo_type = {repo_type}")
             if repo_type != "s3":
+                self.log(f"DEBUG: Not using S3 (repo_type={repo_type}), skipping metadata creation")
                 return True  # Not using S3, skip
             
-            # Get S3 configuration
-            s3_config = self.db.get_s3_config()
+            # Get S3 configuration - in development mode, use different method
+            if workflow_mode == "development":
+                # Development mode uses different S3 config storage
+                s3_config = {
+                    "s3_bucket": self.dev_s3_bucket_var.get() if hasattr(self, 'dev_s3_bucket_var') else "",
+                    "s3_access_key": self.dev_s3_access_var.get() if hasattr(self, 'dev_s3_access_var') else "",
+                    "s3_secret_key": self.dev_s3_secret_var.get() if hasattr(self, 'dev_s3_secret_var') else "",
+                    "s3_endpoint": self.dev_s3_endpoint_var.get() if hasattr(self, 'dev_s3_endpoint_var') else "",
+                    "s3_region": self.dev_s3_region_var.get() if hasattr(self, 'dev_s3_region_var') else "us-east-1"
+                }
+                self.log(f"DEBUG: Using development S3 config")
+            else:
+                # Production mode uses database config
+                s3_config = self.db.get_s3_config()
+                self.log(f"DEBUG: Using production S3 config from database")
+            
+            self.log(f"DEBUG: S3 config keys: {list(s3_config.keys()) if s3_config else 'None'}")
+            
             if not s3_config:
+                self.log("ERROR: S3 configuration is None")
+                return False
+                
+            # Check if required S3 config fields are present
+            required_fields = ['s3_bucket', 's3_access_key', 's3_secret_key', 's3_endpoint']
+            missing_fields = [field for field in required_fields if not s3_config.get(field)]
+            if missing_fields:
+                self.log(f"ERROR: Missing S3 configuration fields: {missing_fields}")
                 return False
             
-            # Create complete image metadata - self-contained for import
+            # Create metadata using exact structure as provided example
+            current_time = datetime.now().isoformat()
+            
             metadata = {
-                "format_version": "1.0",
-                "metadata_type": "image",
-                "image": {
-                    "id": image_uuid,
-                    "role": image_info.get("role", "") if image_info else "",
-                    "workflow_mode": workflow_mode,
-                    "repository_path": image_info.get("repository_path", "") if image_info else "",
-                    "snapshot_count": image_info.get("snapshot_count", 0) if image_info else 0,
-                    "latest_snapshot_id": image_info.get("latest_snapshot_id", "") if image_info else "",
-                    "repository_size_gb": image_info.get("repository_size_gb", 0) if image_info else 0,
-                    "created_at": image_info.get("created_at", datetime.now().isoformat()) if image_info else datetime.now().isoformat(),
-                    "updated_at": datetime.now().isoformat()
-                },
-                "client": {
-                    "id": client_info.get("id", "") if client_info else "",
-                    "name": client_info.get("name", "") if client_info else "",
-                    "short_name": client_info.get("short_name", "") if client_info else "",
-                    "description": client_info.get("description", "") if client_info else ""
-                },
-                "site": {
-                    "id": site_info.get("id", "") if site_info else "",
-                    "name": site_info.get("name", "") if site_info else "",
-                    "short_name": site_info.get("short_name", "") if site_info else "",
-                    "description": site_info.get("description", "") if site_info else ""
-                },
-                "export_info": {
-                    "exported_from": os.environ.get('COMPUTERNAME', 'unknown'),
-                    "export_timestamp": datetime.now().isoformat(),
-                    "tool_version": "1.0"
+                "backup_uuid": image_uuid,
+                "created_timestamp": current_time,
+                "version": "1.0",
+                "tool": "windows-image-prep-gui",
+                "tool_version": "2025.1",
+                "environment": workflow_mode,
+                "status": "in-progress",
+                "tags": {
+                    "client-uuid": client_info.get("id", "") if client_info else "",
+                    "client-name": client_info.get("name", "") if client_info else "",
+                    "client-short": client_info.get("short_name", "") if client_info else "",
+                    "site-uuid": site_info.get("id", "") if site_info else "",
+                    "site-name": site_info.get("name", "") if site_info else "",
+                    "site-short": site_info.get("short_name", "") if site_info else "",
+                    "environment": workflow_mode,
+                    "backup-uuid": image_uuid,
+                    "created-date": current_time,
+                    "role": image_info.get("role", "") if image_info else ""
                 }
             }
             
@@ -1967,32 +1984,61 @@ Updated: {image_data['updated_at']}"""
             if region:
                 os.environ['AWS_DEFAULT_REGION'] = region
             
-            # Upload using AWS CLI
-            upload_cmd = [
-                'aws', 's3', 'cp', 
-                temp_file_path, 
-                f"s3://{s3_bucket}/{metadata_key}",
-                '--region', s3_config.get('s3_region', 'us-east-1')
-            ]
-            
-            # If not using AWS, add endpoint
-            if s3_endpoint != 's3.amazonaws.com':
-                upload_cmd.extend(['--endpoint-url', f"https://{s3_endpoint}"])
-            
-            result = subprocess.run(upload_cmd, capture_output=True, text=True)
-            
-            # Clean up temp file
-            os.unlink(temp_file_path)
-            
-            if result.returncode == 0:
-                print(f"Successfully uploaded image metadata to S3: {metadata_key}")
+            # Upload using boto3 (consistent with rest of codebase)
+            try:
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
+                
+                # Create S3 client
+                s3_client_kwargs = {
+                    'aws_access_key_id': access_key,
+                    'aws_secret_access_key': secret_key,
+                    'region_name': region
+                }
+                
+                # Add endpoint URL if not using AWS S3
+                if s3_endpoint != 's3.amazonaws.com':
+                    s3_client_kwargs["endpoint_url"] = f"https://{s3_endpoint}"
+                
+                s3_client = boto3.client('s3', **s3_client_kwargs)
+                
+                # Read temp file content
+                with open(temp_file_path, 'r', encoding='utf-8') as f:
+                    metadata_content = f.read()
+                
+                # Upload to S3
+                s3_client.put_object(
+                    Bucket=s3_bucket,
+                    Key=metadata_key,
+                    Body=metadata_content.encode('utf-8'),
+                    ContentType='application/json'
+                )
+                
+                # Clean up temp file
+                os.unlink(temp_file_path)
+                
+                self.log(f"SUCCESS: Uploaded image metadata to S3: {metadata_key}")
                 return True
-            else:
-                print(f"Failed to upload image metadata to S3: {result.stderr}")
+                
+            except ImportError:
+                self.log("ERROR: boto3 library not available. Please install: pip install boto3")
+                return False
+            except NoCredentialsError:
+                self.log("ERROR: Invalid S3 credentials - check your S3 configuration")
+                return False
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                error_msg = e.response['Error']['Message']
+                self.log(f"ERROR: S3 ClientError ({error_code}): {error_msg}")
+                return False
+            except Exception as boto_e:
+                self.log(f"ERROR: boto3 upload failed: {str(boto_e)}")
                 return False
                 
         except Exception as e:
-            print(f"Failed to create S3 image metadata: {str(e)}")
+            self.log(f"ERROR: Failed to create S3 image metadata: {str(e)}")
+            import traceback
+            self.log(f"DEBUG: Full traceback: {traceback.format_exc()}")
             return False
 
     def create_workflow_header(self):
@@ -2282,21 +2328,39 @@ Updated: {image_data['updated_at']}"""
         role_combo.grid(row=2, column=1, sticky="w", padx=5)
         
         # Existing images for this client (auto-populated from S3)
-        images_frame = ttk.LabelFrame(develop_frame, text="Existing Development Images", padding="10")
+        images_frame = ttk.LabelFrame(develop_frame, text="Existing Development Images (Filtered by Client)", padding="10")
         images_frame.pack(fill="both", expand=True, pady=(0, 10))
         
-        # Images listbox with scrollbar
+        # Images treeview with columns for better organization
         list_frame = ttk.Frame(images_frame)
         list_frame.pack(fill="both", expand=True)
         
-        self.dev_images_listbox = tk.Listbox(list_frame, height=8)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.dev_images_listbox.yview)
-        self.dev_images_listbox.configure(yscrollcommand=scrollbar.set)
+        # Create Treeview with columns
+        columns = ("role", "site", "status", "date", "uuid")
+        self.dev_images_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=8)
         
-        self.dev_images_listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # Configure column headings and widths
+        self.dev_images_tree.heading("role", text="Role")
+        self.dev_images_tree.heading("site", text="Site")
+        self.dev_images_tree.heading("status", text="Status")
+        self.dev_images_tree.heading("date", text="Created")
+        self.dev_images_tree.heading("uuid", text="UUID")
         
-        self.dev_images_listbox.bind('<<ListboxSelect>>', self.on_dev_image_selected)
+        # Set column widths
+        self.dev_images_tree.column("role", width=80, minwidth=60)
+        self.dev_images_tree.column("site", width=120, minwidth=80)
+        self.dev_images_tree.column("status", width=80, minwidth=60)
+        self.dev_images_tree.column("date", width=100, minwidth=80)
+        self.dev_images_tree.column("uuid", width=150, minwidth=100)
+        
+        # Scrollbar for treeview
+        tree_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.dev_images_tree.yview)
+        self.dev_images_tree.configure(yscrollcommand=tree_scrollbar.set)
+        
+        self.dev_images_tree.pack(side="left", fill="both", expand=True)
+        tree_scrollbar.pack(side="right", fill="y")
+        
+        self.dev_images_tree.bind('<<TreeviewSelect>>', self.on_dev_image_selected)
         
         # Action buttons
         action_frame = ttk.Frame(develop_frame)
@@ -2589,8 +2653,9 @@ Updated: {image_data['updated_at']}"""
     def load_dev_images_for_client_from_s3(self, client_uuid):
         """Load development images for the selected client from S3 metadata"""
         try:
-            # Clear current images list
-            self.dev_images_listbox.delete(0, tk.END)
+            # Clear current images tree
+            for item in self.dev_images_tree.get_children():
+                self.dev_images_tree.delete(item)
             
             if not hasattr(self, 's3_images') or not client_uuid:
                 self.log("INFO: No images found for client")
@@ -2605,15 +2670,28 @@ Updated: {image_data['updated_at']}"""
             # Sort by created date (newest first)
             client_images.sort(key=lambda x: x[1]['created_date'], reverse=True)
             
-            # Populate listbox with image info including status
+            # Populate treeview with image info including site information
             for image_uuid, image_data in client_images:
                 created_date = image_data['created_date'][:10] if image_data['created_date'] else "Unknown"
                 status = image_data['status'].upper()
                 role = image_data['role']
                 
-                # Format: "Role - Status - Date - UUID"
-                display_text = f"{role} - {status} - {created_date} - {image_uuid[:8]}"
-                self.dev_images_listbox.insert(tk.END, display_text)
+                # Get site name for this image
+                site_name = "Unknown"
+                site_uuid = image_data.get('site_uuid')
+                if site_uuid and hasattr(self, 's3_clients') and client_uuid in self.s3_clients:
+                    client_data = self.s3_clients[client_uuid]
+                    if site_uuid in client_data['sites']:
+                        site_name = client_data['sites'][site_uuid]['short_name']
+                
+                # Insert row with columns: role, site, status, date, uuid
+                self.dev_images_tree.insert("", "end", values=(
+                    role,
+                    site_name,
+                    status,
+                    created_date,
+                    image_uuid[:8]
+                ))
             
             self.log(f"INFO: Loaded {len(client_images)} development images for client")
             
@@ -2621,19 +2699,28 @@ Updated: {image_data['updated_at']}"""
             self.log(f"ERROR: Failed to load development images from S3: {e}")
 
     def load_dev_images_for_client(self, client_id):
-        """Load development images for the selected client"""
+        """Load development images for the selected client from database"""
         try:
             # Get development images for this client
             images = self.db_manager.get_images_by_client_and_environment(client_id, "development")
             
-            # Clear and populate listbox
-            self.dev_images_listbox.delete(0, tk.END)
+            # Clear current images tree
+            for item in self.dev_images_tree.get_children():
+                self.dev_images_tree.delete(item)
             
             for image in images:
-                # Format: "Role - Date - UUID"
+                # Format columns: role, site, status, date, uuid
                 created_date = image[4][:10] if image[4] else "Unknown"
-                display_text = f"{image[3]} - {created_date} - {image[0][:8]}"
-                self.dev_images_listbox.insert(tk.END, display_text)
+                site_name = "Unknown"  # Will be populated from database if available
+                
+                # Insert row with columns: role, site, status, date, uuid
+                self.dev_images_tree.insert("", "end", values=(
+                    image[3],  # role
+                    site_name,  # site (to be populated from database)
+                    "ACTIVE",  # status (default for database images)
+                    created_date,  # date
+                    image[0][:8]  # uuid
+                ))
             
             self.log(f"INFO: Loaded {len(images)} development images for client")
             
@@ -2643,12 +2730,18 @@ Updated: {image_data['updated_at']}"""
     def on_dev_image_selected(self, event=None):
         """Handle selection of an existing development image"""
         try:
-            selection = self.dev_images_listbox.curselection()
+            selection = self.dev_images_tree.selection()
             if selection:
-                selected_text = self.dev_images_listbox.get(selection[0])
-                # Extract UUID from the display text
-                image_uuid = selected_text.split(' - ')[-1]
-                self.log(f"INFO: Selected development image: {image_uuid}")
+                item = self.dev_images_tree.item(selection[0])
+                values = item['values']
+                if values:
+                    # Extract information from the selected row
+                    role = values[0]
+                    site = values[1]
+                    status = values[2]
+                    date = values[3]
+                    image_uuid = values[4]
+                    self.log(f"INFO: Selected development image: {image_uuid} ({role} - {site} - {status})")
                 
         except Exception as e:
             self.log(f"ERROR: Failed to handle image selection: {e}")
@@ -2873,7 +2966,7 @@ Updated: {image_data['updated_at']}"""
         """Update an existing development image"""
         try:
             # Check if an image is selected
-            selection = self.dev_images_listbox.curselection()
+            selection = self.dev_images_tree.selection()
             if not selection:
                 messagebox.showwarning("Warning", "Please select an existing image to update")
                 return
@@ -2939,13 +3032,16 @@ Updated: {image_data['updated_at']}"""
                         site_name = site_data['name']
                         break
             
+            # Generate image UUID for this backup
+            image_uuid = generate_uuidv7()
+            
             # Build backup tags for development
             backup_tags = [
                 f"client-uuid:{client_uuid}",
                 f"client-name:{client_name}",
                 f"environment:development",
                 f"role:{self.dev_role_var.get()}",
-                f"backup-uuid:{generate_uuidv7()}",
+                f"backup-uuid:{image_uuid}",
                 f"created-date:{datetime.now().isoformat()}"
             ]
             
@@ -2964,6 +3060,54 @@ Updated: {image_data['updated_at']}"""
             
             # Store backup tags for use by perform_restic_backup
             self._current_backup_tags = backup_tags
+            
+            # **CREATE METADATA JSON FILE BEFORE BACKUP STARTS**
+            self.log("INFO: Creating metadata JSON file before backup...")
+            try:
+                # Prepare client info
+                client_info = {
+                    "id": client_uuid,
+                    "name": client_name,
+                    "short_name": client_short,
+                    "description": client_data.get('description', '') if client_data else ''
+                }
+                
+                # Prepare site info
+                site_info = {
+                    "id": site_uuid if site_uuid else "",
+                    "name": site_name if site_name else "",
+                    "short_name": site_short if site_short else "",
+                    "description": ""
+                }
+                
+                # Prepare initial image info with "in-progress" status
+                image_info = {
+                    "role": self.dev_role_var.get(),
+                    "workflow_mode": "development",
+                    "repository_path": "",  # Will be updated after backup
+                    "snapshot_count": 0,    # Will be updated after backup
+                    "latest_snapshot_id": "",  # Will be updated after backup
+                    "repository_size_gb": 0,   # Will be updated after backup
+                    "created_at": datetime.now().isoformat(),
+                    "status": "in-progress"
+                }
+                
+                # Create the metadata file in S3
+                metadata_created = self.create_s3_image_metadata(
+                    image_uuid, client_info, site_info, image_info, "development"
+                )
+                
+                if metadata_created:
+                    self.log(f"SUCCESS: Created metadata JSON file for image {image_uuid[:8]}")
+                else:
+                    self.log("CRITICAL ERROR: Failed to create metadata JSON file - ABORTING BACKUP")
+                    self.log("ERROR: Cannot proceed without metadata file for image tracking")
+                    return
+                    
+            except Exception as e:
+                self.log(f"CRITICAL ERROR: Error creating metadata file: {e} - ABORTING BACKUP")
+                self.log("ERROR: Cannot proceed without metadata file for image tracking")
+                return
             
             # Download restic executable first
             restic_exe = self.download_restic()
@@ -8747,6 +8891,40 @@ Check your password manager or secure notes where you saved it."""
                 "C:/ProgramData/Microsoft/Windows/WER/*",  # Windows Error Reporting
                 "*/OneDrive*",  # OneDrive cloud-only files that cause VSS issues
                 "*OneDrive*",   # Additional OneDrive pattern
+                # UWP/Windows Store App exclusions (cause access denied errors)
+                "C:/ProgramData/Packages/*",  # All UWP app package data
+                "C:/Program Files/WindowsApps/*",  # Windows Store apps
+                "*/AppData/Local/Packages/*",  # User UWP app data
+                "*/AppData/Local/Microsoft/WindowsApps/*",  # Windows app shortcuts
+                "C:/Windows/SystemApps/*",  # System UWP apps
+                # Specific cache patterns that cause issues
+                "*/SystemAppData/Helium/Cache/*",  # Helium cache files
+                "*/AppData/Local/ConnectedDevicesPlatform/*",  # Connected devices cache
+                "*/AppData/Local/Microsoft/Windows/Explorer/*",  # Explorer cache
+                "C:/ProgramData/USOPrivate/*",  # Update session orchestrator
+                "C:/ProgramData/USOShared/*",   # Update session orchestrator shared
+                # Additional problematic Windows areas
+                "C:/Windows/CloudAPCache/*",  # Azure AD and cloud authentication cache
+                "C:/Windows/SystemTemp/*",   # System temporary files
+                "C:/Windows/ServiceProfiles/*/AppData/Local/Temp/*",  # Service profile temp
+                "C:/Windows/System32/config/systemprofile/AppData/Local/Microsoft/Windows/CloudAPCache/*",  # System profile cloud cache
+                "C:/Windows/System32/config/*/AppData/Local/Microsoft/Windows/CloudAPCache/*",  # All system profiles cloud cache
+                "C:/Windows/Temp/*",  # Additional temp pattern
+                "C:/Windows/CbsTemp/*",  # Component-based servicing temp
+                # Security and Defender exclusions (cause access denied errors)
+                "C:/ProgramData/Microsoft/Crypto/*",  # Cryptographic keys and certificates
+                "C:/ProgramData/Microsoft/Windows/CapabilityAccessManager/*",  # Capability access manager
+                "C:/ProgramData/Microsoft/Windows/SystemData/*",  # System data and lock screen images
+                "C:/ProgramData/Microsoft/Windows Defender/*",  # Windows Defender files
+                "C:/ProgramData/Microsoft/Windows Defender Advanced Threat Protection/*",  # Defender ATP
+                "*/Windows Defender/*",  # Additional Defender pattern
+                "*/Windows Security/*",  # Windows Security app data
+                # Client Side Caching and WMI exclusions (cause access denied errors)
+                "C:/Windows/CSC/*",  # Client Side Caching (Offline Files)
+                "C:/Windows/System32/LogFiles/WMI/*",  # WMI Event Trace Logs
+                "C:/Windows/System32/LogFiles/WMI/RtBackup/*",  # WMI real-time backup logs
+                "*/LogFiles/WMI/*",  # Additional WMI log pattern
+                "*/CSC/*",  # Additional CSC pattern
             ]
             
             for exclusion in exclusions:
@@ -8873,45 +9051,57 @@ Check your password manager or secure notes where you saved it."""
             
             if process.returncode == 0:
                 self.log("SUCCESS: Restic backup completed successfully!")
-                
-                # Store backup metadata in database
-                try:
-                    self.store_backup_metadata(backup_tags)
-                except Exception as e:
-                    self.log(f"WARNING: Could not store backup metadata: {e}")
-                
-                # Store local client metadata JSON file
-                try:
-                    # Extract client info from tags for metadata
-                    tag_dict = {}
-                    for tag in backup_tags:
-                        if ':' in tag:
-                            key, value = tag.split(':', 1)
-                            tag_dict[key] = value
-                    
-                    client_uuid = tag_dict.get('client-uuid')
-                    if client_uuid:
-                        client_info = self.db_manager.get_client_by_id(client_uuid)
-                        site_info = self.db_manager.get_site_by_id(tag_dict.get('site-uuid'))
-                        image_info = {
-                            "id": tag_dict.get('backup-uuid'),
-                            "role": tag_dict.get('role'),
-                            "created_at": datetime.now().isoformat()
-                        }
-                        self.create_client_metadata_json(client_uuid, client_info, site_info, image_info)
-                except Exception as e:
-                    self.log(f"WARNING: Could not create client metadata JSON: {e}")
-                
-                # Store metadata JSON file to S3 for discovery
-                try:
-                    self.store_s3_metadata_file(backup_tags)
-                except Exception as e:
-                    self.log(f"WARNING: Could not store S3 metadata file: {e}")
-                
-                return True
+            elif process.returncode == 3:
+                self.log("SUCCESS: Restic backup completed with warnings (some files could not be read)")
+                self.log("INFO: This is normal - Windows locks certain system files even with VSS")
             else:
                 self.log(f"ERROR: Restic backup failed with exit code: {process.returncode}")
                 return False
+            
+            # Store backup metadata in database for successful backups (exit codes 0 and 3)
+            try:
+                self.store_backup_metadata(backup_tags)
+            except Exception as e:
+                self.log(f"WARNING: Could not store backup metadata: {e}")
+            
+            # Store local client metadata JSON file
+            try:
+                # Extract client info from tags for metadata
+                tag_dict = {}
+                for tag in backup_tags:
+                    if ':' in tag:
+                        key, value = tag.split(':', 1)
+                        tag_dict[key] = value
+                
+                client_uuid = tag_dict.get('client-uuid')
+                if client_uuid:
+                    client_info = self.db.get_client_by_id(client_uuid)
+                    site_info = self.db.get_site_by_id(tag_dict.get('site-uuid'))
+                    image_info = {
+                        "id": tag_dict.get('backup-uuid'),
+                        "role": tag_dict.get('role'),
+                        "created_at": datetime.now().isoformat()
+                    }
+                    self.create_client_metadata_json(client_uuid, client_info, site_info, image_info)
+                    self.log(f"SUCCESS: Created client metadata JSON for image {tag_dict.get('backup-uuid')}")
+            except Exception as e:
+                self.log(f"WARNING: Could not create client metadata JSON: {e}")
+                import traceback
+                self.log(f"DEBUG: Metadata creation error details: {traceback.format_exc()}")
+            
+            # Store metadata JSON file to S3 for discovery
+            try:
+                result = self.store_s3_metadata_file(backup_tags)
+                if result:
+                    self.log(f"SUCCESS: S3 metadata file created for image {tag_dict.get('backup-uuid')}")
+                else:
+                    self.log("WARNING: S3 metadata file creation was skipped or failed")
+            except Exception as e:
+                self.log(f"WARNING: Could not store S3 metadata file: {e}")
+                import traceback
+                self.log(f"DEBUG: S3 metadata error details: {traceback.format_exc()}")
+            
+            return True
                 
         except Exception as e:
             self.log(f"ERROR: Backup execution failed: {e}")
@@ -8971,7 +9161,7 @@ Check your password manager or secure notes where you saved it."""
             self.log(f"ERROR: Failed to store backup metadata: {e}")
 
     def store_s3_metadata_file(self, backup_tags):
-        """Store metadata JSON file to S3 for image discovery"""
+        """Update existing metadata JSON file in S3 with completion details"""
         try:
             # Extract backup UUID and other key info
             tag_dict = {}
@@ -8982,108 +9172,133 @@ Check your password manager or secure notes where you saved it."""
             
             backup_uuid = tag_dict.get('backup-uuid')
             if not backup_uuid:
-                self.log("WARNING: No backup UUID found, cannot store S3 metadata")
+                self.log("WARNING: No backup UUID found, cannot update S3 metadata")
                 return False
                 
-            # Only store metadata for S3 repositories
+            # Only update metadata for S3 repositories
             repo_type = self.repo_type_var.get() if hasattr(self, 'repo_type_var') else "s3"
             if repo_type != "s3":
-                self.log("INFO: Local repository - skipping S3 metadata file")
+                self.log("INFO: Local repository - skipping S3 metadata update")
                 return True
-                
-            # Build comprehensive metadata
-            metadata = {
-                "backup_uuid": backup_uuid,
-                "created_timestamp": datetime.now().isoformat(),
-                "version": "1.0",
-                "tool": "windows-image-prep-gui",
-                "tool_version": "2025.1",
-                "tags": tag_dict,
-                "hardware": {
-                    "system_uuid": tag_dict.get('system-uuid'),
-                    "serial_number": tag_dict.get('serial-number'),
-                    "manufacturer": tag_dict.get('manufacturer'),
-                    "model": tag_dict.get('model'),
-                    "hostname": tag_dict.get('hostname'),
-                    "memory_gb": tag_dict.get('memory-gb')
-                },
-                "client_info": {
-                    "client_uuid": tag_dict.get('client-uuid'),
-                    "client_name": tag_dict.get('client-name'),
-                    "site_uuid": tag_dict.get('site-uuid'),
-                    "site_name": tag_dict.get('site-name'),
-                    "role": tag_dict.get('role')
-                },
-                "backup_info": {
-                    "environment": tag_dict.get('environment'),
-                    "scope": tag_dict.get('scope'),
-                    "date": tag_dict.get('date'),
-                    "time": tag_dict.get('time'),
-                    "timestamp": tag_dict.get('timestamp')
-                },
-                "repository_info": {
-                    "repo_type": tag_dict.get('repo-type'),
-                    "restic_version": tag_dict.get('restic-version')
-                }
-            }
             
-            # Get S3 configuration
-            s3_config = self.db.get_s3_config()
+            # Get S3 configuration  
+            workflow_mode = self.get_workflow_mode()
+            if workflow_mode == "development":
+                s3_config = {
+                    "s3_bucket": self.dev_s3_bucket_var.get() if hasattr(self, 'dev_s3_bucket_var') else "",
+                    "s3_access_key": self.dev_s3_access_var.get() if hasattr(self, 'dev_s3_access_var') else "",
+                    "s3_secret_key": self.dev_s3_secret_var.get() if hasattr(self, 'dev_s3_secret_var') else "",
+                    "s3_endpoint": self.dev_s3_endpoint_var.get() if hasattr(self, 'dev_s3_endpoint_var') else "",
+                    "s3_region": self.dev_s3_region_var.get() if hasattr(self, 'dev_s3_region_var') else "us-east-1"
+                }
+            else:
+                s3_config = self.db.get_s3_config()
+            
             if not s3_config:
-                self.log("ERROR: No S3 configuration found")
+                self.log("ERROR: No S3 configuration found for metadata update")
                 return False
             
-            # Build S3 metadata file path in root metadata folder
-            # Create JSON content
-            json_content = json.dumps(metadata, indent=2, ensure_ascii=False)
-            
-            # Create temporary file with metadata
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as temp_file:
-                temp_file.write(json_content)
-                temp_file_path = temp_file.name
+            # Try to download existing metadata file first
+            metadata_key = f"metadata/{backup_uuid}.json"
+            existing_metadata = None
             
             try:
-                # Use AWS CLI to upload metadata file to S3 root metadata folder
-                s3_metadata_path = f"s3://{s3_config['s3_bucket']}/metadata/{backup_uuid}.json"
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
                 
-                # Set up environment for AWS CLI
-                env = os.environ.copy()
-                env['AWS_ACCESS_KEY_ID'] = s3_config['s3_access_key']
-                env['AWS_SECRET_ACCESS_KEY'] = s3_config['s3_secret_key']
-                if s3_config.get('s3_endpoint') and not s3_config['s3_endpoint'].startswith('s3.'):
-                    env['AWS_ENDPOINT_URL'] = f"https://{s3_config['s3_endpoint']}"
+                # Create S3 client
+                s3_client_kwargs = {
+                    'aws_access_key_id': s3_config['s3_access_key'],
+                    'aws_secret_access_key': s3_config['s3_secret_key'],
+                    'region_name': s3_config.get('s3_region', 'us-east-1')
+                }
                 
-                # Upload using AWS CLI
-                aws_cmd = [
-                    "aws", "s3", "cp", temp_file_path, s3_metadata_path,
-                    "--content-type", "application/json"
-                ]
+                # Add endpoint URL if not using AWS S3
+                s3_endpoint = s3_config.get('s3_endpoint', 's3.amazonaws.com')
+                if s3_endpoint != 's3.amazonaws.com':
+                    s3_client_kwargs["endpoint_url"] = f"https://{s3_endpoint}"
                 
-                self.log(f"INFO: Uploading metadata to: {s3_metadata_path}")
+                s3_client = boto3.client('s3', **s3_client_kwargs)
                 
-                result = subprocess.run(
-                    aws_cmd,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
+                # Try to get existing metadata
+                try:
+                    response = s3_client.get_object(
+                        Bucket=s3_config['s3_bucket'],
+                        Key=metadata_key
+                    )
+                    existing_content = response['Body'].read().decode('utf-8')
+                    existing_metadata = json.loads(existing_content)
+                    self.log(f"INFO: Found existing metadata file, updating it")
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'NoSuchKey':
+                        self.log("WARNING: No existing metadata file found, creating new one")
+                    else:
+                        raise
+                
+                # Update existing metadata or create with same structure
+                if existing_metadata:
+                    # Update existing metadata - keep same structure, just change status and add completion details
+                    metadata = existing_metadata.copy()
+                    metadata["status"] = "completed"
+                    metadata["completed_timestamp"] = datetime.now().isoformat()
+                    
+                    # Add hardware info to tags if available
+                    if "tags" in metadata:
+                        if tag_dict.get('system-uuid'):
+                            metadata["tags"]["system-uuid"] = tag_dict.get('system-uuid')
+                        if tag_dict.get('serial-number'):
+                            metadata["tags"]["serial-number"] = tag_dict.get('serial-number')
+                        if tag_dict.get('manufacturer'):
+                            metadata["tags"]["manufacturer"] = tag_dict.get('manufacturer')
+                        if tag_dict.get('model'):
+                            metadata["tags"]["model"] = tag_dict.get('model')
+                        if tag_dict.get('hostname'):
+                            metadata["tags"]["hostname"] = tag_dict.get('hostname')
+                        if tag_dict.get('memory-gb'):
+                            metadata["tags"]["memory-gb"] = tag_dict.get('memory-gb')
+                else:
+                    # Create new metadata with exact structure (fallback case)
+                    current_time = datetime.now().isoformat()
+                    metadata = {
+                        "backup_uuid": backup_uuid,
+                        "created_timestamp": current_time,
+                        "version": "1.0",
+                        "tool": "windows-image-prep-gui",
+                        "tool_version": "2025.1",
+                        "environment": tag_dict.get('environment', 'development'),
+                        "status": "completed",
+                        "completed_timestamp": current_time,
+                        "tags": tag_dict
+                    }
+            
+                # Upload updated metadata back to S3
+                json_content = json.dumps(metadata, indent=2, ensure_ascii=False)
+                
+                s3_client.put_object(
+                    Bucket=s3_config['s3_bucket'],
+                    Key=metadata_key,
+                    Body=json_content.encode('utf-8'),
+                    ContentType='application/json'
                 )
                 
-                if result.returncode == 0:
-                    self.log("SUCCESS: Metadata file uploaded to S3")
-                    self.log(f"INFO: Metadata location: {s3_metadata_path}")
-                    return True
-                else:
-                    self.log(f"ERROR: Failed to upload metadata to S3: {result.stderr}")
-                    return False
-                    
-            finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_file_path)
-                except:
-                    pass
+                self.log(f"SUCCESS: Updated metadata file in S3: {metadata_key}")
+                self.log(f"INFO: Status changed from 'in-progress' to 'completed'")
+                return True
+                
+            except ImportError:
+                self.log("ERROR: boto3 library not available for metadata update")
+                return False
+            except NoCredentialsError:
+                self.log("ERROR: Invalid S3 credentials for metadata update")
+                return False
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                error_msg = e.response['Error']['Message']
+                self.log(f"ERROR: S3 ClientError during metadata update ({error_code}): {error_msg}")
+                return False
+            except Exception as boto_e:
+                self.log(f"ERROR: boto3 metadata update failed: {str(boto_e)}")
+                return False
                     
         except Exception as e:
             self.log(f"ERROR: Failed to store S3 metadata file: {e}")
